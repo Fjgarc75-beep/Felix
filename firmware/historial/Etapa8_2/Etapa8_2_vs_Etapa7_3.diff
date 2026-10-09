@@ -1,0 +1,485 @@
+--- Etapa7_3/Etapa7_3.ino	2026-10-01 19:44:01.404503437 -0600
++++ Etapa8_2/Etapa8_2.ino	2026-10-02 11:01:56.229649752 -0600
+@@ -1,7 +1,7 @@
+ /*
+  * =====================================================================
+- *  ETAPA 7.3 - Integración: Etapa 6.2 (MAX30102 + PPG + BPM + SpO2)
+- *              + interfaz TFT de la Etapa 7.2 (capa de presentación)
++ *  ETAPA 8.2 - Gráfica PPG IR en tiempo real en la TFT
++ *              (copia de la Etapa 7.3 validada + gráfica de barrido)
+  * =====================================================================
+  *  Proyecto : Monitor experimental de frecuencia cardiaca y SpO2
+  *  Materia  : Sistemas de Información Hospitalaria
+@@ -26,6 +26,23 @@
+  *    TFT SCK -> 18    TFT SDA -> 23    TFT A0 -> 16
+  *    TFT RESET -> 17  TFT CS -> 5      (sin MISO, microSD sin usar)
+  *
++ *  ETAPA 8.2 - GRÁFICA PPG (solo capa de presentación):
++ *    - Fuente: el búfer EXISTENTE spAcIr[] (lo llena spo2StoreSample()
++ *      en cada muestra), con spOk[] como validez y sampleIndex como
++ *      posición. PPG graficada = -spAcIr[] (pico sistólico hacia arriba,
++ *      igual que el detector de BPM y el modo 'k'). No hay segunda
++ *      lectura del FIFO ni cambios en processSample().
++ *    - 4 muestras promediadas por columna (~25 columnas/s, ~5.1 s por
++ *      pantalla). Barrido continuo: se borra UNA columna por delante del
++ *      cursor y se dibuja la actual. Sin fillScreen() durante la medición.
++ *    - Escala automática lenta (cada 25 columnas, ventana de 50 columnas,
++ *      70 % de la altura, zona muerta, crece rápido / reduce lento,
++ *      rango mínimo 40 cuentas).
++ *    - SIN DEDO: línea plana gris. BUSCANDO/MALA: PPG real en gris.
++ *      REGULAR/BUENA: PPG real en verde. La línea se corta si hay
++ *      muestras perdidas.
++ *    - Comando 'l': activar/desactivar la gráfica.
++ *
+  *  ETAPA 7.3 - INTEGRACIÓN (solo capa de presentación):
+  *    - Todo el código de la Etapa 6.2 (adquisición, PPG, filtros, BPM,
+  *      R, SpO2, estados, pruebas guiadas, medición de fs) se conserva
+@@ -103,6 +120,7 @@
+  *    i -> configuración y coeficientes     h -> ayuda
+  *    y -> diagnóstico de integración (FIFO, pérdidas, tiempos TFT)  [7.3]
+  *    f -> redibujado completo de la TFT (no durante pruebas)         [7.3]
++ *    l -> activar/desactivar la gráfica PPG (no durante pruebas)     [8.2]
+  * =====================================================================
+  */
+ 
+@@ -2835,22 +2853,24 @@
+ //  DISEÑO: COORDENADAS (rotación 0, 128 x 160)
+ //  Fuente clásica GFX: 6 x 8 px por carácter x tamaño.
+ // =================================================================
+-const int UI_HDR_H      = 14;                    // franja 0-13
+-const int UI_TITLE_X    = 31,  UI_TITLE_Y   = 3;   // "MONITOR PPG"
+-const int UI_HRLBL_X    = 7,   UI_HRLBL_Y   = 17;  // "FRECUENCIA CARDIACA"
+-const int UI_BPM_X      = 16,  UI_BPM_Y     = 28;  // campo 3 car., tamaño 4 (28-59)
++// Etapa 8.2: distribución B (se libera la franja 107-146 para la gráfica)
++const int UI_HDR_H      = 11;                    // franja 0-10
++const int UI_TITLE_X    = 31,  UI_TITLE_Y   = 2;   // "MONITOR PPG"
++const int UI_BPM_X      = 16,  UI_BPM_Y     = 14;  // campo 3 car., tamaño 4 (14-45)
+ const int UI_BPM_SIZE   = 4;
+-const int UI_BPMU_X     = 55,  UI_BPMU_Y    = 62;  // "BPM"
+-const int UI_LINE1_Y    = 73;
+-const int UI_SPLBL_X    = 25,  UI_SPLBL_Y   = 77;  // "SpO2 ESTIMADA"
+-const int UI_SP_Y       = 88;                      // campo tamaño 3 (88-111)
++const int UI_FC_X       = 92,  UI_FC_Y      = 12;  // "FC"  tamaño 2 (12-27)
++const int UI_BPMU_X     = 92,  UI_BPMU_Y    = 28;  // "BPM" tamaño 2 (28-43)
++const int UI_LINE1_Y    = 47;
++const int UI_SPLBL_X    = 98,  UI_SPLBL_Y   = 50;  // "SpO2" tamaño 1 (50-57)
++const int UI_SP_Y       = 51;                      // campo tamaño 3 (51-74)
+ const int UI_SP_SIZE    = 3;
+-const int UI_PCT_Y      = 95;                      // "%" tamaño 2, base alineada
+-const int UI_LINE2_Y    = 115;
+-const int UI_QLBL_X     = 49,  UI_QLBL_Y    = 119; // "SEÑAL"
+-const int UI_Q_X        = 16,  UI_Q_Y       = 129; // campo 8 car., tamaño 2 (129-144)
++const int UI_PCT_Y      = 58;                      // "%" tamaño 2 (58-73), base alineada
++const int UI_LINE2_Y    = 76;
++const int UI_QLBL_X     = 49,  UI_QLBL_Y    = 79;  // "SEÑAL" (79-86)
++const int UI_Q_X        = 16,  UI_Q_Y       = 88;  // campo 8 car., tamaño 2 (88-103)
+ const int UI_Q_SIZE     = 2;
+ const int UI_Q_CHARS    = 8;
++const int UI_LINEQ_Y    = 105;                     // separa la calidad de la gráfica
+ const int UI_LINE3_Y    = 148;
+ const int UI_PIE_X      = 1,   UI_PIE_Y     = 151; // campo 21 car., tamaño 1
+ const int UI_PIE_CHARS  = 21;
+@@ -2942,8 +2962,8 @@
+ }
+ 
+ // Coordenadas del campo SpO2 según SPO2_DECIMALS
+-int uiSpo2FieldX()  { return (SPO2_DECIMALS > 0) ? 4 : 22; }   // " 98.5" (5 car.) o " 98" (3 car.)
+-int uiPctX()        { return (SPO2_DECIMALS > 0) ? 98 : 80; }
++int uiSpo2FieldX()  { return (SPO2_DECIMALS > 0) ? 4 : 40; }   // " 98.5" (5 car.) o " 98" (3 car.)
++int uiPctX()        { return 98; }                               // Etapa 8.2: "%" fijo bajo "SpO2"
+ 
+ // =================================================================
+ //  CAPA DE DIBUJO (único lugar que escribe en la TFT)
+@@ -2956,20 +2976,23 @@
+   tft.print("MONITOR PPG");
+ 
+   tft.setTextColor(COL_ETIQUETA, COL_FONDO);
+-  tft.setCursor(UI_HRLBL_X, UI_HRLBL_Y);
+-  tft.print("FRECUENCIA CARDIACA");
++  tft.setTextSize(2);
++  tft.setCursor(UI_FC_X, UI_FC_Y);
++  tft.print("FC");
+   tft.setCursor(UI_BPMU_X, UI_BPMU_Y);
+   tft.print("BPM");
+-  tft.drawFastHLine(8, UI_LINE1_Y, 112, COL_LINEA);
++  tft.setTextSize(1);
++  tft.drawFastHLine(4, UI_LINE1_Y, 120, COL_LINEA);
+ 
+   tft.setCursor(UI_SPLBL_X, UI_SPLBL_Y);
+-  tft.print("SpO2 ESTIMADA");
+-  tft.drawFastHLine(8, UI_LINE2_Y, 112, COL_LINEA);
++  tft.print("SpO2");
++  tft.drawFastHLine(4, UI_LINE2_Y, 120, COL_LINEA);
+ 
+   tft.setCursor(UI_QLBL_X, UI_QLBL_Y);
+   tft.print("SE");
+   tft.write((uint8_t)0xA5);           // 'Ñ' en la tabla CP437 de la fuente GFX
+   tft.print("AL");
++  tft.drawFastHLine(0, UI_LINEQ_Y, 128, COL_LINEA);
+   tft.drawFastHLine(0, UI_LINE3_Y, 128, COL_LINEA);
+ }
+ 
+@@ -3086,6 +3109,7 @@
+   uiFillScreenCount++;
+   uiDibujarEstatica();
+   for (int f = 0; f < UI_NUM_F; f++) uiDibujarCampo(f, now);
++  uiPpgDibujarMarco();                    // Etapa 8.2: área de la gráfica
+   uiFullRedrawUs = micros() - t0;
+ }
+ 
+@@ -3105,6 +3129,7 @@
+   uiDesiredKey[UI_F_SPO2] = -1;
+   uiDesiredKey[UI_F_CAL]  = CAL_BUSCANDO;
+   uiDesiredKey[UI_F_PIE]  = uiModo;
++  uiPpgInit();                                        // Etapa 8.2: estado de la gráfica
+   uiPantallaInicio();                                 // Etapa 7.3: aviso de 3 s
+   delay(UI_SPLASH_MS);                                // solo en setup(), sensor aún sin iniciar
+   uiRedibujarTodo();
+@@ -3146,6 +3171,273 @@
+ }
+ 
+ 
++// #################################################################
++//  ETAPA 8.2 - GRÁFICA PPG IR (solo presentación)
++//  La gráfica NO conoce BPM, SpO2, filtros ni búferes internos: recibe
++//  números (valor, validez, modo) desde la capa de integración.
++// #################################################################
++const int      UI_PPG_TOP        = 107;   // área 107-146 (40 px)
++const int      UI_PPG_BOTTOM     = 146;
++const int      UI_PPG_YMIN       = 108;   // filas de trazo 108-145
++const int      UI_PPG_YMAX       = 145;
++const int      UI_PPG_W          = 128;
++const int      UI_PPG_GAP        = 4;     // columnas borradas por delante del cursor
++const int      UI_PPG_SAMPLES_PER_COL = 4; // 4 muestras promediadas por columna
++const float    UI_PPG_FILL       = 0.70f; // la señal ocupa ~70 % de la altura
++const float    UI_PPG_SPAN_MIN   = 40.0f; // rango mínimo (cuentas): no amplificar ruido
++const float    UI_PPG_SPAN_INIT  = 1000.0f; // rango provisional tras un reinicio de escala
++const int      UI_PPG_SCALE_COLS = 25;    // recalcular escala cada 25 columnas (~1 s)
++const int      UI_PPG_SCALE_WIN  = 50;    // ventana de la escala: 50 columnas (~2 s)
++const int      UI_PPG_SCALE_MIN_VALID = 10; // columnas válidas mínimas para recalcular
++const float    UI_PPG_DEADBAND   = 0.20f; // zona muerta del rango (+-20 %)
++const float    UI_PPG_SHRINK     = 0.25f; // reducción lenta del rango por actualización
++const float    UI_PPG_CENTER_DB  = 0.10f; // zona muerta del centro (10 % del rango)
++const float    UI_PPG_CENTER_K   = 0.50f; // ajuste del centro
++const uint32_t UI_PPG_MAX_LAG    = 200;   // atraso máximo (búfer spAcIr de 256)
++const uint32_t UI_PPG_RATE_MS    = 5000;  // ventana para medir columnas/s
++
++const int      UI_PPG_PLANA      = 0;     // SIN DEDO: línea plana gris
++const int      UI_PPG_GRIS       = 1;     // BUSCANDO / MALA: PPG real en gris
++const int      UI_PPG_NORMAL     = 2;     // REGULAR / BUENA: PPG real en verde
++
++const uint16_t COL_PPG           = ST77XX_GREEN;
++const uint16_t COL_PPG_GRIS      = COL_INVALIDO;
++
++bool     uiPpgActiva        = true;
++int      uiPpgX             = 0;          // columna actual del cursor
++int      uiPpgPrevY         = -1;         // -1 = línea cortada (no unir)
++float    uiPpgAcc           = 0.0f;       // acumulador de 4 muestras
++int      uiPpgAccN          = 0;
++bool     uiPpgAccOk         = true;
++float    uiPpgColVal[UI_PPG_W];           // valor de cada columna (para la escala)
++bool     uiPpgColOk[UI_PPG_W];            // columna válida para la escala
++float    uiPpgCenter        = 0.0f;
++float    uiPpgSpan          = UI_PPG_SPAN_INIT;
++bool     uiPpgScaleFresh    = true;
++int      uiPpgColsSinceScale = 0;
++uint32_t uiPpgLastIdx       = 0;          // última muestra consumida (sampleIndex)
++uint32_t uiPpgLostSeen      = 0;
++int      uiPpgPrevMode      = -1;
++// Estadísticas (comando 'y')
++uint32_t uiPpgCols          = 0;
++uint32_t uiPpgLastUs        = 0;
++uint32_t uiPpgMaxUs         = 0;
++uint32_t uiPpgSumUs         = 0;
++uint32_t uiPpgScaleChanges  = 0;
++uint32_t uiPpgBufJumps      = 0;
++uint32_t uiPpgLineCuts      = 0;
++uint32_t uiPpgRateRefMs     = 0;
++uint32_t uiPpgRateRefCols   = 0;
++float    uiPpgColsPerSec    = 0.0f;
++
++void uiPpgReiniciarEscala() {
++  uiPpgSpan   = UI_PPG_SPAN_INIT;
++  uiPpgCenter = 0.0f;
++  uiPpgScaleFresh = true;
++  uiPpgColsSinceScale = 0;
++  for (int i = 0; i < UI_PPG_W; i++) uiPpgColOk[i] = false;
++}
++
++void uiPpgCortarLinea() {
++  uiPpgPrevY = -1;
++  uiPpgAcc   = 0.0f;
++  uiPpgAccN  = 0;
++  uiPpgAccOk = true;
++  uiPpgLineCuts++;
++}
++
++void uiPpgInit() {
++  uiPpgX = 0;
++  for (int i = 0; i < UI_PPG_W; i++) uiPpgColVal[i] = 0.0f;
++  uiPpgReiniciarEscala();
++  uiPpgCortarLinea();
++  uiPpgLineCuts  = 0;
++  uiPpgLastIdx   = sampleIndex;
++  uiPpgLostSeen  = lostSamples;
++  uiPpgPrevMode  = -1;
++  uiPpgRateRefMs = 0;                     // se fija con la primera muestra consumida
++  uiPpgRateRefCols = 0;
++}
++
++// Borra SOLO el área de la gráfica (128 x 40). Se usa en uiRedibujarTodo()
++// y al activar/desactivar con 'l' (acciones deliberadas, no en medición).
++void uiPpgDibujarMarco() {
++  tft.fillRect(0, UI_PPG_TOP, UI_PPG_W, UI_PPG_BOTTOM - UI_PPG_TOP + 1, COL_FONDO);
++  uiPpgX = 0;
++  uiPpgCortarLinea();
++  if (!uiPpgActiva) {
++    tft.setTextSize(1);
++    tft.setTextColor(COL_INVALIDO, COL_FONDO);
++    tft.setCursor(7, 123);
++    tft.print("GRAFICA DESACTIVADA");
++  }
++}
++
++int uiPpgValorAPixel(float valor) {
++  float mid = (UI_PPG_YMIN + UI_PPG_YMAX) / 2.0f;
++  float alto = (float)(UI_PPG_YMAX - UI_PPG_YMIN);
++  int y = (int)lroundf(mid - (valor - uiPpgCenter) * alto / uiPpgSpan);
++  if (y < UI_PPG_YMIN) y = UI_PPG_YMIN;      // recorte: fuera de escala va al borde
++  if (y > UI_PPG_YMAX) y = UI_PPG_YMAX;
++  return y;
++}
++
++// Escala lenta: mínimo/máximo de las últimas 50 columnas válidas.
++void uiPpgActualizarEscala() {
++  int n = 0;
++  float mn = 0.0f, mx = 0.0f;
++  for (int k = 1; k <= UI_PPG_SCALE_WIN; k++) {
++    int i = (uiPpgX - k + UI_PPG_W) % UI_PPG_W;
++    if (!uiPpgColOk[i]) continue;
++    float v = uiPpgColVal[i];
++    if (n == 0) { mn = v; mx = v; }
++    if (v < mn) mn = v;
++    if (v > mx) mx = v;
++    n++;
++  }
++  if (n < UI_PPG_SCALE_MIN_VALID) return;
++  float tSpan = (mx - mn) / UI_PPG_FILL;
++  if (tSpan < UI_PPG_SPAN_MIN) tSpan = UI_PPG_SPAN_MIN;
++  float tCenter = (mx + mn) / 2.0f;
++  bool changed = false;
++  if (uiPpgScaleFresh) {
++    uiPpgSpan = tSpan;  uiPpgCenter = tCenter;
++    uiPpgScaleFresh = false;
++    changed = true;
++  } else {
++    if (tSpan > uiPpgSpan * (1.0f + UI_PPG_DEADBAND)) {          // crece de inmediato
++      uiPpgSpan = tSpan;  changed = true;
++    } else if (tSpan < uiPpgSpan * (1.0f - UI_PPG_DEADBAND)) {   // se reduce despacio
++      uiPpgSpan += UI_PPG_SHRINK * (tSpan - uiPpgSpan);  changed = true;
++    }
++    if (fabsf(tCenter - uiPpgCenter) > UI_PPG_CENTER_DB * uiPpgSpan) {
++      uiPpgCenter += UI_PPG_CENTER_K * (tCenter - uiPpgCenter);  changed = true;
++    }
++  }
++  if (changed) uiPpgScaleChanges++;
++}
++
++// Dibuja una columna: borra la columna UI_PPG_GAP posiciones adelante y
++// traza el segmento vertical entre el punto anterior y el actual.
++void uiPpgDibujarColumna(float valor, bool valida, int modo) {
++  uint32_t t0 = micros();
++  int x = uiPpgX;
++  int xe = (x + UI_PPG_GAP) % UI_PPG_W;
++  tft.drawFastVLine(xe, UI_PPG_TOP, UI_PPG_BOTTOM - UI_PPG_TOP + 1, COL_FONDO);
++
++  int y;
++  uint16_t color;
++  if (modo == UI_PPG_PLANA) {
++    y = (UI_PPG_YMIN + UI_PPG_YMAX) / 2;
++    color = COL_PPG_GRIS;
++  } else {
++    y = uiPpgValorAPixel(valor);
++    color = (modo == UI_PPG_NORMAL && valida) ? COL_PPG : COL_PPG_GRIS;
++  }
++  int y0 = (uiPpgPrevY < 0) ? y : uiPpgPrevY;
++  int lo = (y0 < y) ? y0 : y;
++  int hi = (y0 < y) ? y : y0;
++  tft.drawFastVLine(x, lo, hi - lo + 1, color);
++  uiPpgPrevY = y;
++  uint32_t dt = micros() - t0;
++
++  uiPpgColVal[x] = valor;
++  uiPpgColOk[x]  = (modo != UI_PPG_PLANA) && valida;
++  uiPpgX = (x + 1) % UI_PPG_W;
++  uiPpgCols++;
++  uiPpgLastUs = dt;
++  uiPpgSumUs += dt;
++  if (dt > uiPpgMaxUs) uiPpgMaxUs = dt;
++
++  if (++uiPpgColsSinceScale >= UI_PPG_SCALE_COLS) {
++    uiPpgColsSinceScale = 0;
++    uiPpgActualizarEscala();
++  }
++}
++
++// Acumula muestras; cada 4 produce una columna con su promedio.
++void uiPpgAgregarMuestra(float valor, bool ok, int modo) {
++  uiPpgAcc += valor;
++  if (!ok) uiPpgAccOk = false;
++  uiPpgAccN++;
++  if (uiPpgAccN >= UI_PPG_SAMPLES_PER_COL) {
++    float media = uiPpgAcc / (float)uiPpgAccN;
++    bool  okCol = uiPpgAccOk;
++    uiPpgAcc = 0.0f;  uiPpgAccN = 0;  uiPpgAccOk = true;
++    uiPpgDibujarColumna(media, okCol, modo);
++  }
++}
++
++// ---- Adaptador de datos (ÚNICO lugar que conoce el búfer de la 6.1/6.2) ----
++// spo2StoreSample() guarda lastAc[CH_IR] de CADA muestra en
++// spAcIr[sampleIndex % SP_BUF_SIZE]; la PPG es la señal invertida.
++float ppgMuestra(uint32_t idx) {
++  return -spAcIr[idx % SP_BUF_SIZE];
++}
++
++bool ppgMuestraOk(uint32_t idx) {
++  return spOk[idx % SP_BUF_SIZE];
++}
++
++// ---- Integración: se llama justo después de readFifo() ----
++void uiPpgConsumirMuestras(uint32_t now) {
++  uint32_t last = sampleIndex;
++  if (!uiPpgActiva) {                        // desactivada: solo seguir el índice
++    uiPpgLastIdx  = last;
++    uiPpgLostSeen = lostSamples;
++    return;
++  }
++  // Muestras perdidas: no unir puntos falsos y reiniciar la escala
++  if (lostSamples != uiPpgLostSeen) {
++    uiPpgLostSeen = lostSamples;
++    uiPpgCortarLinea();
++    uiPpgReiniciarEscala();
++  }
++  // Protección: nunca leer más atrás de lo que conserva spAcIr[]
++  if (last - uiPpgLastIdx > UI_PPG_MAX_LAG) {
++    uiPpgBufJumps++;
++    uiPpgLastIdx = last;
++    uiPpgCortarLinea();
++  }
++  // Modo según los estados existentes (calidadDesdeEstados, Etapa 7.3)
++  int cal  = calidadDesdeEstados();
++  int modo = UI_PPG_GRIS;
++  if (cal == CAL_SIN_DEDO) modo = UI_PPG_PLANA;
++  else if (cal == CAL_BUENA || cal == CAL_REGULAR) modo = UI_PPG_NORMAL;
++  bool plana     = (modo == UI_PPG_PLANA);
++  bool prevPlana = (uiPpgPrevMode == UI_PPG_PLANA);
++  if (uiPpgPrevMode >= 0 && plana != prevPlana) {   // dedo colocado o retirado
++    uiPpgCortarLinea();
++    uiPpgReiniciarEscala();
++  }
++  uiPpgPrevMode = modo;
++
++  while (uiPpgLastIdx != last) {
++    uiPpgLastIdx++;
++    uiPpgAgregarMuestra(ppgMuestra(uiPpgLastIdx), ppgMuestraOk(uiPpgLastIdx), modo);
++  }
++
++  if (uiPpgRateRefMs == 0) {                         // inicio de la medición de columnas/s
++    uiPpgRateRefMs   = now;
++    uiPpgRateRefCols = uiPpgCols;
++  } else if (now - uiPpgRateRefMs >= UI_PPG_RATE_MS) {   // columnas/s medidas
++    uiPpgColsPerSec  = (uiPpgCols - uiPpgRateRefCols) * 1000.0f / (now - uiPpgRateRefMs);
++    uiPpgRateRefMs   = now;
++    uiPpgRateRefCols = uiPpgCols;
++  }
++}
++
++// Comando 'l'
++void uiPpgAlternar() {
++  uiPpgActiva = !uiPpgActiva;
++  uiPpgReiniciarEscala();
++  uiPpgDibujarMarco();
++  uiPpgLastIdx  = sampleIndex;
++  uiPpgLostSeen = lostSamples;
++  uiPpgPrevMode = -1;
++  uiPpgRateRefMs = 0;                     // reinicia la medición de columnas/s
++}
++
+ // =================================================================
+ //  ETAPA 7.3 - INTEGRACIÓN: capa de presentación (SOLO LECTURA)
+ //  No modifica ninguna variable de la adquisición ni de los algoritmos.
+@@ -3214,7 +3506,7 @@
+ 
+ // Comando 'y'
+ void printIntegracion() {
+-  Serial.println("\n============ DIAGNOSTICO DE INTEGRACION (Etapa 7.3) ============");
++  Serial.println("\n============ DIAGNOSTICO DE INTEGRACION (Etapa 8.2) ============");
+   Serial.println(" ADQUISICION (MAX30102)");
+   Serial.printf ("   Muestras procesadas        : %lu\n", (unsigned long)sampleIndex);
+   Serial.printf ("   Muestras perdidas          : %lu %s\n", (unsigned long)lostSamples,
+@@ -3241,6 +3533,25 @@
+     if (f != UI_F_PIE) worst += uiMaxUs[f];
+   }
+   Serial.printf ("   Peor caso BPM+SpO2+Calidad : %.2f ms\n", worst / 1000.0f);
++  Serial.println(" GRAFICA PPG (Etapa 8.2)");
++  Serial.printf ("   Estado                     : %s\n", uiPpgActiva ? "ACTIVADA" : "DESACTIVADA");
++  Serial.printf ("   Columnas dibujadas         : %lu\n", (unsigned long)uiPpgCols);
++  if (uiPpgColsPerSec > 0.0f) {
++    Serial.printf ("   Columnas/s                 : %.2f (esperado fs/4 = %.2f)\n",
++                   uiPpgColsPerSec, measuredFs / UI_PPG_SAMPLES_PER_COL);
++  } else {
++    Serial.printf ("   Columnas/s                 : midiendo (primera ventana de %lu s)\n",
++                   (unsigned long)(UI_PPG_RATE_MS / 1000UL));
++  }
++  Serial.printf ("   Tiempo por columna (us)    : ultimo %lu | max %lu | prom %lu\n",
++                 (unsigned long)uiPpgLastUs, (unsigned long)uiPpgMaxUs,
++                 (unsigned long)(uiPpgCols ? uiPpgSumUs / uiPpgCols : 0));
++  Serial.printf ("   Rango vertical             : %.0f cuentas (centro %.0f)%s\n",
++                 uiPpgSpan, uiPpgCenter, uiPpgScaleFresh ? " [provisional]" : "");
++  Serial.printf ("   Cambios de escala          : %lu\n", (unsigned long)uiPpgScaleChanges);
++  Serial.printf ("   Saltos del bufer           : %lu\n", (unsigned long)uiPpgBufJumps);
++  Serial.printf ("   Cortes de linea            : %lu\n", (unsigned long)uiPpgLineCuts);
++  Serial.printf ("   Peor caso numeros + 1 columna: %.2f ms\n", (worst + uiPpgMaxUs) / 1000.0f);
+   Serial.println(" PANTALLA vs ESTADOS");
+   char sp[12];
+   formatSpo2Key(sp, sizeof(sp), uiShownKey[UI_F_SPO2]);
+@@ -3281,6 +3592,7 @@
+   Serial.println("  i -> configuracion, registros y coeficientes");
+   Serial.println("  y -> diagnostico de integracion: FIFO, perdidas, tiempos TFT");   // 7.3
+   Serial.println("  f -> redibujar toda la pantalla TFT (no durante pruebas)");       // 7.3
++  Serial.println("  l -> activar/desactivar la grafica PPG (no durante pruebas)");    // 8.2
+   Serial.println("  h -> ayuda\n");
+ }
+ 
+@@ -3388,6 +3700,13 @@
+         Serial.printf(">> Pantalla redibujada: %.1f ms (fillScreen #%lu)\n",
+                       uiFullRedrawUs / 1000.0f, (unsigned long)uiFillScreenCount);
+       }
++    } else if (c == 'l' || c == 'L') {          // Etapa 8.2
++      if (anyTestRunning()) {
++        Serial.println(">> No se cambia la grafica durante una prueba.");
++      } else {
++        uiPpgAlternar();
++        Serial.printf(">> Grafica PPG %s\n", uiPpgActiva ? "ACTIVADA" : "DESACTIVADA");
++      }
+     } else if (c == 'h' || c == 'H') {
+       printHelp();
+     } else {
+@@ -3406,7 +3725,7 @@
+ 
+   Serial.println();
+   Serial.println("================================================");
+-  Serial.println(" ETAPA 7.3 - Integracion: Etapa 6.2 + interfaz TFT (Etapa 7.2)");
++  Serial.println(" ETAPA 8.2 - Etapa 7.3 + grafica PPG IR en la TFT");
+   Serial.println(" Prototipo academico - NO es dispositivo medico");
+   Serial.println(" BPM, R y SpO2 = estimaciones experimentales, SIN validez clinica");
+   Serial.println("================================================");
+@@ -3461,6 +3780,7 @@
+     integracionAntesDeLeer(now);                // Etapa 7.3: solo registra tiempos
+     readFifo();
+     integracionDespuesDeLeer();                 // Etapa 7.3: nivel máximo del FIFO
++    uiPpgConsumirMuestras(now);                 // Etapa 8.2: gráfica (solo lee spAcIr[])
+     uiActualizarDesdeEstados(now);              // Etapa 7.3: TFT con el FIFO recién vaciado
+   }
+ 

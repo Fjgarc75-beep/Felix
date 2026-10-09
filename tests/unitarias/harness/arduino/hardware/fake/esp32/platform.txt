@@ -1,0 +1,13 @@
+name=Fake
+version=1.0.0
+tools.ctags.path={runtime.platform.path}/../../../tools/ctags
+tools.ctags.cmd.path={path}/ctags
+tools.ctags.pattern="{cmd.path}" -u --language-force=c++ -f - --c++-kinds=svpf --fields=KSTtzns --line-directives "{source_file}"
+preproc.macros.flags=-w -x c++ -E -CC
+recipe.preproc.macros=g++ -std=gnu++17 -DARDUINO=10819 {preproc.macros.flags} -I{build.core.path} {includes} "{source_file}" -o "{preprocessed_file_path}"
+recipe.cpp.o.pattern=g++ -c -std=gnu++17 -Wall -Wextra -DARDUINO=10819 -I{build.core.path} {includes} "{source_file}" -o "{object_file}"
+recipe.c.o.pattern=gcc -c -I{build.core.path} {includes} "{source_file}" -o "{object_file}"
+recipe.S.o.pattern=gcc -c "{source_file}" -o "{object_file}"
+recipe.ar.pattern=ar rcs "{archive_file_path}" "{object_file}"
+recipe.c.combine.pattern=g++ -o "{build.path}/{build.project_name}.elf" {object_files} "{archive_file_path}"
+recipe.size.pattern=true

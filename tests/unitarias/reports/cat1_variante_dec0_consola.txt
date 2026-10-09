@@ -1,0 +1,5 @@
+[ OK  ] C1_13_V0   formatSpo2Key                L  (4 verificaciones)
+[ OK  ] C1_14_V0   uiSpo2FieldX                 L  (2 verificaciones)
+[ OK  ] C1_15_V0   uiPctX                       L  (1 verificaciones)
+
+cat1_variante_dec0: 3 casos, 3 aprobados, 0 fallidos

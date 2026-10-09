@@ -1,0 +1,3 @@
+fake.name=Fake ESP32
+fake.build.core=fake
+fake.build.board=FAKE
