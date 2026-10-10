@@ -2,6 +2,10 @@
 
 Cada etapa partió de la anterior. Las cifras de hardware son las que reportó el autor; las de PC son simulación. Las fechas son las de los archivos y reportes disponibles (fechas exactas de cada etapa pendientes: F8).
 
+## Documentación – 2026-10-10
+
+- Versiones en PDF (A4) de la documentación técnica y del manual de usuario en `docs/pdf/`, generadas a partir de los Markdown del repositorio.
+
 ## Documentación – 2026-10-09
 
 - Publicación en el repositorio de la documentación técnica, el manual de usuario, la presentación (`.pptx` con notas y guion oral), el plan de pruebas, los resultados, la matriz de trazabilidad, el inventario documental, el expediente de evidencias, los diagramas y las pruebas unitarias de la Categoría 1.

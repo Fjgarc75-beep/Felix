@@ -65,8 +65,8 @@ Pruebas unitarias en PC (Linux o WSL): ver [tests/unitarias/README.md](tests/uni
 
 | Documento | Contenido |
 | --- | --- |
-| [Documentación técnica](docs/documentacion-tecnica.md) | 42 capítulos: fundamento, arquitectura, algoritmos, P1–P4, pruebas, resultados, limitaciones y anexos |
-| [Manual de usuario](docs/manual-usuario.md) | Uso del equipo para una persona que no conoce el código |
+| [Documentación técnica](docs/documentacion-tecnica.md) ([PDF](docs/pdf/documentacion-tecnica.pdf)) | 42 capítulos: fundamento, arquitectura, algoritmos, P1–P4, pruebas, resultados, limitaciones y anexos |
+| [Manual de usuario](docs/manual-usuario.md) ([PDF](docs/pdf/manual-usuario.pdf)) | Uso del equipo para una persona que no conoce el código |
 | [Presentación](docs/presentacion/presentacion-proyecto.pptx) y [guion oral](docs/presentacion/guion-oral.md) | 20 diapositivas con notas del expositor (≈ 14.5 min) |
 | [Plan de pruebas – Etapa 10](docs/pruebas/plan-pruebas-etapa10.md) | Categorías 1, 2a–2g, H0–H13 y E1–E17 |
 | [Resultados de pruebas](docs/pruebas/resultados-pruebas.md) | Separados en hardware, simulación en PC y pendientes |
@@ -87,6 +87,7 @@ Pruebas unitarias en PC (Linux o WSL): ver [tests/unitarias/README.md](tests/uni
 │   ├── manual-usuario.md
 │   ├── inventario-documental.md
 │   ├── limitaciones-y-seguridad.md
+│   ├── pdf/               documentacion-tecnica.pdf, manual-usuario.pdf
 │   ├── presentacion/      presentacion-proyecto.pptx, guion-oral.md
 │   ├── diagramas/         5 diagramas en PNG y SVG
 │   ├── pruebas/           plan, resultados y matriz de trazabilidad
