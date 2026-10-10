@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="cat1_variante_dec0" tests="3" failures="0">
+  <testcase classname="formatSpo2Key" name="C1_13_V0 modo entero (SPO2_DECIMALS = 0): 98 -&gt; &quot; 98&quot;; -1 -&gt; &quot; --&quot;"></testcase>
+  <testcase classname="uiSpo2FieldX" name="C1_14_V0 modo entero: x = 40 y el campo de 3 caracteres termina antes del %"></testcase>
+  <testcase classname="uiPctX" name="C1_15_V0 modo entero: el % sigue en x = 98"></testcase>
+</testsuite>

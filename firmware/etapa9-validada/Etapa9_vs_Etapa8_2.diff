@@ -1,0 +1,545 @@
+--- Etapa8_2/Etapa8_2.ino	2026-10-02 11:01:56.229649752 -0600
++++ Etapa9/Etapa9.ino	2026-10-02 11:30:05.975618746 -0600
+@@ -1,7 +1,21 @@
+ /*
+  * =====================================================================
+- *  ETAPA 8.2 - Gráfica PPG IR en tiempo real en la TFT
+- *              (copia de la Etapa 7.3 validada + gráfica de barrido)
++ *  ETAPA 9 - Integración y optimización (robustez y diagnóstico)
++ *            (copia de la Etapa 8.2 validada)
++ *
++ *  ETAPA 9 (solo vigilancia, recuperación y diagnóstico; los algoritmos
++ *  de adquisición, PPG, BPM, R y SpO2 NO cambian):
++ *    P1 - Vigilancia de sampleIndex: si no llegan muestras nuevas durante
++ *         1 s, la pantalla deja de mostrar BPM/SpO2 (-- / --.-), calidad
++ *         BUSCANDO, pie "SENSOR NO RESPONDE" y aviso en la gráfica.
++ *    P2 - Si no llegan muestras durante 3 s: sensorReady = false y la
++ *         RUTA EXISTENTE de reintento llama a initSensor() (misma
++ *         configuración, readFifo() sin cambios).
++ *    P3 - Instrumentación de cada inicialización: tiempo hasta la primera
++ *         lectura del FIFO, nivel del FIFO y pérdidas de esa lectura;
++ *         pérdidas de arranque separadas de las de operación.
++ *    P4 - Sumas de tiempo de 64 bits, tramos de diagnóstico ('z') sin
++ *         borrar los acumulados, y 'y' ampliado.
+  * =====================================================================
+  *  Proyecto : Monitor experimental de frecuencia cardiaca y SpO2
+  *  Materia  : Sistemas de Información Hospitalaria
+@@ -121,6 +135,7 @@
+  *    y -> diagnóstico de integración (FIFO, pérdidas, tiempos TFT)  [7.3]
+  *    f -> redibujado completo de la TFT (no durante pruebas)         [7.3]
+  *    l -> activar/desactivar la gráfica PPG (no durante pruebas)     [8.2]
++ *    z -> iniciar un tramo nuevo de diagnóstico (acumulados intactos)  [9]
+  * =====================================================================
+  */
+ 
+@@ -2896,12 +2911,68 @@
+ uint32_t uiDraws[UI_NUM_F];              // redibujados reales
+ uint32_t uiLastUs[UI_NUM_F];
+ uint32_t uiMaxUs[UI_NUM_F];
+-uint32_t uiSumUs[UI_NUM_F];
++uint64_t uiSumUs[UI_NUM_F];             // Etapa 9: 64 bits (pruebas largas)
+ uint32_t uiFillScreenCount = 0;          // solo uiInit / uiRedibujarTodo
+ int      uiModo            = MODO_EXPERIMENTAL;
+ uint32_t uiFullRedrawUs    = 0;
+ 
+ // =================================================================
++//  ETAPA 9 - VARIABLES DE VIGILANCIA, ARRANQUE Y TRAMOS
++//  Solo presentación/diagnóstico; no las lee ningún algoritmo.
++// =================================================================
++const uint32_t VIGILANCIA_UI_MS     = 1000;  // P1: sin muestras -> no mostrar valores
++const uint32_t VIGILANCIA_REINIT_MS = 3000;  // P2: sin muestras -> reinicializar sensor
++const int      MODO_SIN_DATOS       = 3;     // pie "SENSOR NO RESPONDE"
++const int      ARR_ARRANQUE         = 0;     // tipos de inicialización (P3)
++const int      ARR_REINTENTO        = 1;     // sensor ausente al encender y luego detectado
++const int      ARR_RECUPERACION     = 2;     // reinicialización por P2
++
++// P1 / P2
++bool     datosCongelados        = false;
++uint32_t ultimaMuestraIdx       = 0;
++uint32_t ultimaMuestraMs        = 0;
++uint32_t eventosSinDatos        = 0;
++uint32_t inicioSinDatosMs       = 0;
++uint32_t tiempoSinDatosMs       = 0;     // acumulado (ms)
++uint32_t recuperacionesIniciadas = 0;
++uint32_t recuperacionesExitosas = 0;
++bool     reinitPorVigilancia    = false;
++
++// P3
++uint32_t inicializaciones       = 0;     // arranque + reintentos + recuperaciones
++int      arranqueTipo           = ARR_ARRANQUE;
++uint32_t arranqueInitMs         = 0;
++bool     arranquePendiente      = false;
++uint32_t arranqueLost0          = 0;
++uint32_t arranqueOvf0           = 0;
++uint32_t arranqueSetupMs        = 0;     // init -> fin de setup() (solo arranque)
++bool     arranqueSetupMedido    = false;
++uint32_t arranqueGapMs          = 0;     // init -> primera lectura del FIFO
++int      arranqueFifo           = 0;     // nivel del FIFO en esa lectura
++uint32_t arranqueLost           = 0;     // pérdidas de esa lectura
++uint32_t arranqueOvf            = 0;     // desbordamientos de esa lectura
++uint32_t arranqueLostTotal      = 0;     // suma de todas las inicializaciones
++uint32_t arranqueOvfTotal       = 0;
++
++// P4: tramo actual (desde el encendido o el último 'z')
++uint32_t tramoInicioMs          = 0;
++uint32_t tramoMuestras0         = 0;
++uint32_t tramoLost0             = 0;
++uint32_t tramoOvf0              = 0;
++uint32_t tramoI2c0              = 0;
++uint32_t tramoCols0             = 0;
++uint32_t tramoSinDatos0         = 0;
++uint32_t tramoRecIni0           = 0;
++uint32_t tramoRecOk0            = 0;
++uint32_t tramoArrLost0          = 0;
++uint32_t tramoArrOvf0           = 0;
++uint32_t tramoHeap0             = 0;
++uint32_t tramoMaxGapMs          = 0;
++int      tramoMaxFifo           = 0;
++uint32_t tramoMaxCampoUs[UI_NUM_F];
++uint32_t tramoMaxColUs          = 0;
++
++// =================================================================
+ //  UTILIDADES DE TEXTO
+ // =================================================================
+ const char *calidadTexto(int calidad) {
+@@ -2924,7 +2995,9 @@
+ }
+ 
+ const char *modoTexto(int modo) {
+-  return (modo == MODO_SIN_SENSOR) ? "SENSOR NO DETECTADO" : "ESTIM. EXPERIMENTAL";
++  if (modo == MODO_SIN_SENSOR) return "SENSOR NO DETECTADO";
++  if (modo == MODO_SIN_DATOS)  return "SENSOR NO RESPONDE";   // Etapa 9 (P1)
++  return "ESTIM. EXPERIMENTAL";
+ }
+ 
+ const char *campoNombre(int f) {
+@@ -3057,6 +3130,7 @@
+   uiLastUs[f] = dt;
+   uiSumUs[f] += dt;
+   if (dt > uiMaxUs[f]) uiMaxUs[f] = dt;
++  if (dt > tramoMaxCampoUs[f]) tramoMaxCampoUs[f] = dt;   // Etapa 9: máximo del tramo
+ }
+ 
+ // Registra el valor deseado; dibuja solo si lo visible cambia.
+@@ -3166,7 +3240,8 @@
+ }
+ 
+ void uiSetModo(int modo) {
+-  uiModo = (modo == MODO_SIN_SENSOR) ? MODO_SIN_SENSOR : MODO_EXPERIMENTAL;
++  if (modo == MODO_SIN_SENSOR || modo == MODO_SIN_DATOS) uiModo = modo;   // Etapa 9
++  else uiModo = MODO_EXPERIMENTAL;
+   uiSolicitar(UI_F_PIE, uiModo);
+ }
+ 
+@@ -3222,7 +3297,7 @@
+ uint32_t uiPpgCols          = 0;
+ uint32_t uiPpgLastUs        = 0;
+ uint32_t uiPpgMaxUs         = 0;
+-uint32_t uiPpgSumUs         = 0;
++uint64_t uiPpgSumUs         = 0;          // Etapa 9: 64 bits
+ uint32_t uiPpgScaleChanges  = 0;
+ uint32_t uiPpgBufJumps      = 0;
+ uint32_t uiPpgLineCuts      = 0;
+@@ -3270,6 +3345,11 @@
+     tft.setTextColor(COL_INVALIDO, COL_FONDO);
+     tft.setCursor(7, 123);
+     tft.print("GRAFICA DESACTIVADA");
++  } else if (datosCongelados) {             // Etapa 9 (P1): sin muestras nuevas
++    tft.setTextSize(1);
++    tft.setTextColor(ST77XX_ORANGE, COL_FONDO);
++    tft.setCursor(4, 123);
++    tft.print("SIN DATOS DEL SENSOR");
+   }
+ }
+ 
+@@ -3348,6 +3428,7 @@
+   uiPpgLastUs = dt;
+   uiPpgSumUs += dt;
+   if (dt > uiPpgMaxUs) uiPpgMaxUs = dt;
++  if (dt > tramoMaxColUs) tramoMaxColUs = dt;   // Etapa 9: máximo del tramo
+ 
+   if (++uiPpgColsSinceScale >= UI_PPG_SCALE_COLS) {
+     uiPpgColsSinceScale = 0;
+@@ -3467,12 +3548,16 @@
+ void uiActualizarDesdeEstados(uint32_t now) {
+   if (now - uiLastEvalMs >= UI_EVAL_PERIOD_MS) {
+     uiLastEvalMs = now;
+-    bool bpmOk  = sensorReady && (hrState == HR_VALID);
+-    bool spo2Ok = sensorReady && (oxState == OX_VALID);   // sin número si no es OX_VALID
++    // Etapa 9 (P1): con datos congelados no se muestra ningún valor
++    bool datosOk = sensorReady && !datosCongelados;
++    bool bpmOk  = datosOk && (hrState == HR_VALID);
++    bool spo2Ok = datosOk && (oxState == OX_VALID);   // sin número si no es OX_VALID
+     actualizarBPM(bpmOk ? (int)(hrStableBpm() + 0.5f) : 0, bpmOk);
+     actualizarSpO2(spo2Ok ? oxSpo2 : 0.0f, spo2Ok);
+-    actualizarCalidad(calidadDesdeEstados());
+-    uiSetModo(sensorReady ? MODO_EXPERIMENTAL : MODO_SIN_SENSOR);
++    actualizarCalidad(datosCongelados ? CAL_BUSCANDO : calidadDesdeEstados());
++    if (!sensorReady)         uiSetModo(MODO_SIN_SENSOR);
++    else if (datosCongelados) uiSetModo(MODO_SIN_DATOS);
++    else                      uiSetModo(MODO_EXPERIMENTAL);
+   }
+   uiService(now);                 // cambios pendientes por el intervalo de 500 ms
+ }
+@@ -3482,12 +3567,30 @@
+   if (lastFifoReadMs != 0) {
+     uint32_t gap = now - lastFifoReadMs;
+     if (gap > maxPollGapMs) maxPollGapMs = gap;
++    if (gap > tramoMaxGapMs) tramoMaxGapMs = gap;        // Etapa 9 (P4)
+   }
+   lastFifoReadMs = now;
++  if (arranquePendiente) arranqueGapMs = now - arranqueInitMs;   // Etapa 9 (P3)
+ }
+ 
+-void integracionDespuesDeLeer() {
++// Etapa 9: recibe el valor devuelto por readFifo() (-1 = error I2C)
++void integracionDespuesDeLeer(int leidas) {
+   if (lastFifoLevel > maxFifoLevelSeen) maxFifoLevelSeen = lastFifoLevel;
++  if (leidas < 0) return;                    // sin lectura válida: nada más que registrar
++  if (lastFifoLevel > tramoMaxFifo) tramoMaxFifo = lastFifoLevel;   // Etapa 9 (P4)
++  if (arranquePendiente) {                   // Etapa 9 (P3): primera lectura tras init
++    arranquePendiente = false;
++    arranqueFifo = lastFifoLevel;
++    arranqueLost = lostSamples - arranqueLost0;
++    arranqueOvf  = overflowEvents - arranqueOvf0;
++    arranqueLostTotal += arranqueLost;
++    arranqueOvfTotal  += arranqueOvf;
++    Serial.printf("[ARRANQUE] init #%lu (%s): ", (unsigned long)inicializaciones, arranqueTipoTexto(arranqueTipo));
++    if (arranqueSetupMedido) Serial.printf("setup tras init %lu ms | ", (unsigned long)arranqueSetupMs);
++    Serial.printf("primera lectura a %lu ms | FIFO %d/%d | perdidas %lu | desbordamientos %lu\n",
++                  (unsigned long)arranqueGapMs, arranqueFifo, FIFO_DEPTH,
++                  (unsigned long)arranqueLost, (unsigned long)arranqueOvf);
++  }
+ }
+ 
+ const char *resetReasonText(int r) {   // recibe esp_reset_reason() convertido a int
+@@ -3504,40 +3607,214 @@
+   }
+ }
+ 
+-// Comando 'y'
++
++// =================================================================
++//  ETAPA 9 - VIGILANCIA (P1), RECUPERACIÓN (P2), ARRANQUE (P3), TRAMOS (P4)
++//  Solo leen sampleIndex, lostSamples, overflowEvents, i2cErrors y
++//  sensorReady; P2 únicamente pone sensorReady = false para que actúe la
++//  ruta de reintento EXISTENTE en loop() (initSensor() sin cambios).
++// =================================================================
++const char *arranqueTipoTexto(int tipo) {
++  if (tipo == ARR_RECUPERACION) return "recuperacion P2";
++  if (tipo == ARR_REINTENTO)    return "reintento";
++  return "arranque";
++}
++
++// P3: se llama justo después de un initSensor() exitoso
++void arranqueRegistrarInit(uint32_t now, int tipo) {
++  inicializaciones++;
++  arranqueTipo        = tipo;
++  arranqueInitMs      = now;
++  arranquePendiente   = true;
++  arranqueLost0       = lostSamples;
++  arranqueOvf0        = overflowEvents;
++  arranqueSetupMs     = 0;
++  arranqueSetupMedido = false;
++  arranqueGapMs       = 0;
++}
++
++// P3: al final de setup(); mide lo que tarda el resto de setup()
++// (impresión de la configuración) después de iniciar el sensor
++void arranqueFinSetup(uint32_t now) {
++  if (arranquePendiente) {
++    arranqueSetupMs = now - arranqueInitMs;
++    arranqueSetupMedido = true;
++  }
++}
++
++void vigilanciaReiniciar(uint32_t now) {
++  ultimaMuestraIdx = sampleIndex;
++  ultimaMuestraMs  = now;
++}
++
++// P1 + P2: se llama después de cada lectura del FIFO (solo con sensorReady)
++void vigilanciaMuestras(uint32_t now) {
++  if (sampleIndex != ultimaMuestraIdx) {          // llegaron muestras
++    ultimaMuestraIdx = sampleIndex;
++    ultimaMuestraMs  = now;
++    if (datosCongelados) {
++      datosCongelados = false;
++      uint32_t dur = now - inicioSinDatosMs;
++      tiempoSinDatosMs += dur;
++      Serial.printf(">> [VIGILANCIA] Muestras recuperadas tras %lu ms sin datos\n", (unsigned long)dur);
++      uiPpgReiniciarEscala();
++      uiPpgDibujarMarco();                        // limpia el aviso de la gráfica
++      uiLastEvalMs = now - UI_EVAL_PERIOD_MS;     // actualizar la pantalla ya
++    }
++    return;
++  }
++  uint32_t sinDatos = now - ultimaMuestraMs;
++  if (!datosCongelados && sinDatos >= VIGILANCIA_UI_MS) {          // P1
++    datosCongelados  = true;
++    eventosSinDatos++;
++    inicioSinDatosMs = ultimaMuestraMs;
++    Serial.printf(">> [VIGILANCIA] %lu ms sin muestras nuevas: la pantalla deja de mostrar BPM/SpO2\n",
++                  (unsigned long)sinDatos);
++    uiPpgDibujarMarco();                          // aviso "SIN DATOS DEL SENSOR"
++    uiLastEvalMs = now - UI_EVAL_PERIOD_MS;       // actualizar la pantalla ya
++  }
++  if (datosCongelados && sinDatos >= VIGILANCIA_REINIT_MS) {       // P2
++    recuperacionesIniciadas++;
++    reinitPorVigilancia = true;
++    Serial.printf(">> [RECUPERACION] %lu ms sin muestras: se reinicializa el MAX30102 (initSensor, misma configuracion)\n",
++                  (unsigned long)sinDatos);
++    sensorReady = false;                          // la ruta de reintento existente actúa
++    lastRetryMs = now - 5000;                     // primer intento inmediato
++  }
++}
++
++// P2/P3: se llama en la rama de reintento cuando initSensor() tiene éxito
++void vigilanciaSensorRecuperado(uint32_t now) {
++  int tipo = ARR_REINTENTO;
++  if (reinitPorVigilancia) {
++    tipo = ARR_RECUPERACION;
++    recuperacionesExitosas++;
++    reinitPorVigilancia = false;
++  }
++  arranqueRegistrarInit(now, tipo);
++  vigilanciaReiniciar(now);                       // el plazo de 1 s / 3 s empieza de nuevo
++}
++
++// P4: inicia un tramo nuevo; los acumulados NO se modifican
++void tramoReiniciar(uint32_t now) {
++  tramoInicioMs  = now;
++  tramoMuestras0 = sampleIndex;
++  tramoLost0     = lostSamples;
++  tramoOvf0      = overflowEvents;
++  tramoI2c0      = i2cErrors;
++  tramoCols0     = uiPpgCols;
++  tramoSinDatos0 = eventosSinDatos;
++  tramoRecIni0   = recuperacionesIniciadas;
++  tramoRecOk0    = recuperacionesExitosas;
++  tramoArrLost0  = arranqueLostTotal;
++  tramoArrOvf0   = arranqueOvfTotal;
++  tramoHeap0     = ESP.getFreeHeap();
++  tramoMaxGapMs  = 0;
++  tramoMaxFifo   = 0;
++  for (int f = 0; f < UI_NUM_F; f++) tramoMaxCampoUs[f] = 0;
++  tramoMaxColUs  = 0;
++}
++
++// Comando 'y' (Etapa 9: acumulado + tramo + arranques + vigilancia)
+ void printIntegracion() {
+-  Serial.println("\n============ DIAGNOSTICO DE INTEGRACION (Etapa 8.2) ============");
+-  Serial.println(" ADQUISICION (MAX30102)");
++  uint32_t now = millis();
++  uint32_t opLost = lostSamples - arranqueLostTotal;
++  uint32_t opOvf  = overflowEvents - arranqueOvfTotal;
++  Serial.println("\n================ DIAGNOSTICO (Etapa 9) ================");
++  Serial.printf (" ACUMULADO DESDE EL ENCENDIDO (%lu s)\n", (unsigned long)(now / 1000UL));
+   Serial.printf ("   Muestras procesadas        : %lu\n", (unsigned long)sampleIndex);
+-  Serial.printf ("   Muestras perdidas          : %lu %s\n", (unsigned long)lostSamples,
+-                 lostSamples == 0 ? "-> OK" : "-> REVISAR (la TFT o el Serie podrian retrasar la lectura)");
+-  Serial.printf ("   Desbordamientos del FIFO   : %lu\n", (unsigned long)overflowEvents);
+-  Serial.printf ("   Nivel maximo del FIFO      : %d de %d muestras (%.0f %%)\n",
+-                 maxFifoLevelSeen, FIFO_DEPTH, 100.0f * maxFifoLevelSeen / FIFO_DEPTH);
+-  Serial.printf ("   Separacion maxima lecturas : %lu ms (nominal %lu ms; capacidad del FIFO ~%.0f ms)\n",
++  Serial.printf ("   Muestras perdidas          : %lu (arranques %lu | operacion %lu)\n",
++                 (unsigned long)lostSamples, (unsigned long)arranqueLostTotal, (unsigned long)opLost);
++  Serial.printf ("   Desbordamientos del FIFO   : %lu (arranques %lu | operacion %lu)\n",
++                 (unsigned long)overflowEvents, (unsigned long)arranqueOvfTotal, (unsigned long)opOvf);
++  Serial.printf ("   Nivel maximo del FIFO      : %d de %d muestras\n", maxFifoLevelSeen, FIFO_DEPTH);
++  Serial.printf ("   Separacion maxima lecturas : %lu ms (nominal %lu; capacidad del FIFO ~%.0f ms)\n",
+                  (unsigned long)maxPollGapMs, (unsigned long)POLL_INTERVAL_MS,
+                  FIFO_DEPTH * 1000.0f / measuredFs);
+   Serial.printf ("   Frecuencia de muestreo     : %.2f muestras/s\n", measuredFs);
+   Serial.printf ("   Errores I2C                : %lu\n", (unsigned long)i2cErrors);
+-  Serial.println(" TFT (16 MHz, actualizacion parcial)");
++
++  uint32_t tDur = now - tramoInicioMs;
++  float tSeg = tDur / 1000.0f;
++  uint32_t tMuestras = sampleIndex - tramoMuestras0;
++  uint32_t tLost = lostSamples - tramoLost0;
++  uint32_t tArrLost = arranqueLostTotal - tramoArrLost0;
++  uint32_t tOvf = overflowEvents - tramoOvf0;
++  uint32_t tArrOvf = arranqueOvfTotal - tramoArrOvf0;
++  uint32_t tWorst = 0;
++  for (int f = 0; f < UI_NUM_F; f++) if (f != UI_F_PIE) tWorst += tramoMaxCampoUs[f];
++  Serial.printf (" TRAMO ACTUAL ('z' para reiniciar): %.0f s\n", tSeg);
++  Serial.printf ("   Muestras / promedio        : %lu / %.2f muestras/s\n",
++                 (unsigned long)tMuestras, tSeg > 0.0f ? tMuestras / tSeg : 0.0f);
++  Serial.printf ("   Perdidas                   : %lu (arranques %lu | operacion %lu)\n",
++                 (unsigned long)tLost, (unsigned long)tArrLost, (unsigned long)(tLost - tArrLost));
++  Serial.printf ("   Desbordamientos            : %lu (arranques %lu | operacion %lu)\n",
++                 (unsigned long)tOvf, (unsigned long)tArrOvf, (unsigned long)(tOvf - tArrOvf));
++  Serial.printf ("   Errores I2C                : %lu\n", (unsigned long)(i2cErrors - tramoI2c0));
++  Serial.printf ("   FIFO max / separacion max  : %d de %d / %lu ms\n",
++                 tramoMaxFifo, FIFO_DEPTH, (unsigned long)tramoMaxGapMs);
++  Serial.printf ("   TFT: peor BPM+SpO2+Cal     : %.2f ms | columna max %lu us\n",
++                 tWorst / 1000.0f, (unsigned long)tramoMaxColUs);
++  Serial.printf ("   Columnas / promedio        : %lu / %.2f columnas/s\n",
++                 (unsigned long)(uiPpgCols - tramoCols0),
++                 tSeg > 0.0f ? (uiPpgCols - tramoCols0) / tSeg : 0.0f);
++  Serial.printf ("   Eventos sin datos          : %lu | recuperaciones %lu iniciadas / %lu exitosas\n",
++                 (unsigned long)(eventosSinDatos - tramoSinDatos0),
++                 (unsigned long)(recuperacionesIniciadas - tramoRecIni0),
++                 (unsigned long)(recuperacionesExitosas - tramoRecOk0));
++  Serial.printf ("   Heap libre inicio -> ahora : %lu -> %lu bytes\n",
++                 (unsigned long)tramoHeap0, (unsigned long)ESP.getFreeHeap());
++
++  Serial.println(" ARRANQUES E INICIALIZACIONES DEL SENSOR (P3)");
++  Serial.printf ("   Inicializaciones exitosas  : %lu\n", (unsigned long)inicializaciones);
++  if (inicializaciones > 0) {
++    Serial.printf ("   Ultima (%s)    : ", arranqueTipoTexto(arranqueTipo));
++    if (arranqueSetupMedido) Serial.printf("setup tras init %lu ms | ", (unsigned long)arranqueSetupMs);
++    if (arranquePendiente) {
++      Serial.println("primera lectura PENDIENTE");
++    } else {
++      Serial.printf("primera lectura a %lu ms | FIFO %d/%d | perdidas %lu | desbordamientos %lu\n",
++                    (unsigned long)arranqueGapMs, arranqueFifo, FIFO_DEPTH,
++                    (unsigned long)arranqueLost, (unsigned long)arranqueOvf);
++    }
++  }
++
++  Serial.println(" VIGILANCIA DE MUESTRAS (P1) Y RECUPERACION (P2)");
++  if (!sensorReady) {
++    Serial.println("   Estado                     : SENSOR NO LISTO (reintento cada 5 s)");
++  } else if (datosCongelados) {
++    Serial.printf ("   Estado                     : SIN DATOS desde hace %lu ms\n",
++                   (unsigned long)(now - inicioSinDatosMs));
++  } else {
++    Serial.printf ("   Estado                     : datos al dia (ultima muestra hace %lu ms)\n",
++                   (unsigned long)(now - ultimaMuestraMs));
++  }
++  Serial.printf ("   Umbrales                   : pantalla %lu ms | reinicializacion %lu ms\n",
++                 (unsigned long)VIGILANCIA_UI_MS, (unsigned long)VIGILANCIA_REINIT_MS);
++  Serial.printf ("   Eventos sin datos          : %lu | tiempo total sin datos %lu ms\n",
++                 (unsigned long)eventosSinDatos, (unsigned long)tiempoSinDatosMs);
++  Serial.printf ("   Recuperaciones             : %lu iniciadas / %lu exitosas\n",
++                 (unsigned long)recuperacionesIniciadas, (unsigned long)recuperacionesExitosas);
++
++  Serial.println(" TFT (16 MHz, actualizacion parcial) - acumulado");
+   Serial.printf ("   fillScreen usados          : %lu (solo aviso inicial / uiRedibujarTodo)\n",
+                  (unsigned long)uiFillScreenCount);
+   Serial.printf ("   Ultimo redibujado completo : %.1f ms\n", uiFullRedrawUs / 1000.0f);
+   Serial.println("   Campo    llamadas  redibujados  ultimo(us)  max(us)  prom(us)");
+   uint32_t worst = 0;
+   for (int f = 0; f < UI_NUM_F; f++) {
+-    uint32_t avg = uiDraws[f] ? uiSumUs[f] / uiDraws[f] : 0;
++    uint32_t avg = uiDraws[f] ? (uint32_t)(uiSumUs[f] / uiDraws[f]) : 0;
+     Serial.printf ("   %s  %8lu  %11lu  %10lu  %7lu  %8lu\n", campoNombre(f),
+                    (unsigned long)uiCalls[f], (unsigned long)uiDraws[f], (unsigned long)uiLastUs[f],
+                    (unsigned long)uiMaxUs[f], (unsigned long)avg);
+     if (f != UI_F_PIE) worst += uiMaxUs[f];
+   }
+   Serial.printf ("   Peor caso BPM+SpO2+Calidad : %.2f ms\n", worst / 1000.0f);
+-  Serial.println(" GRAFICA PPG (Etapa 8.2)");
++  Serial.println(" GRAFICA PPG - acumulado");
+   Serial.printf ("   Estado                     : %s\n", uiPpgActiva ? "ACTIVADA" : "DESACTIVADA");
+   Serial.printf ("   Columnas dibujadas         : %lu\n", (unsigned long)uiPpgCols);
+   if (uiPpgColsPerSec > 0.0f) {
+-    Serial.printf ("   Columnas/s                 : %.2f (esperado fs/4 = %.2f)\n",
++    Serial.printf ("   Columnas/s (ultimos 5 s)   : %.2f (esperado fs/4 = %.2f)\n",
+                    uiPpgColsPerSec, measuredFs / UI_PPG_SAMPLES_PER_COL);
+   } else {
+     Serial.printf ("   Columnas/s                 : midiendo (primera ventana de %lu s)\n",
+@@ -3545,27 +3822,25 @@
+   }
+   Serial.printf ("   Tiempo por columna (us)    : ultimo %lu | max %lu | prom %lu\n",
+                  (unsigned long)uiPpgLastUs, (unsigned long)uiPpgMaxUs,
+-                 (unsigned long)(uiPpgCols ? uiPpgSumUs / uiPpgCols : 0));
++                 (unsigned long)(uiPpgCols ? (uint32_t)(uiPpgSumUs / uiPpgCols) : 0));
+   Serial.printf ("   Rango vertical             : %.0f cuentas (centro %.0f)%s\n",
+                  uiPpgSpan, uiPpgCenter, uiPpgScaleFresh ? " [provisional]" : "");
+-  Serial.printf ("   Cambios de escala          : %lu\n", (unsigned long)uiPpgScaleChanges);
+-  Serial.printf ("   Saltos del bufer           : %lu\n", (unsigned long)uiPpgBufJumps);
+-  Serial.printf ("   Cortes de linea            : %lu\n", (unsigned long)uiPpgLineCuts);
+-  Serial.printf ("   Peor caso numeros + 1 columna: %.2f ms\n", (worst + uiPpgMaxUs) / 1000.0f);
++  Serial.printf ("   Cambios de escala / saltos del bufer / cortes de linea: %lu / %lu / %lu\n",
++                 (unsigned long)uiPpgScaleChanges, (unsigned long)uiPpgBufJumps, (unsigned long)uiPpgLineCuts);
+   Serial.println(" PANTALLA vs ESTADOS");
+   char sp[12];
+   formatSpo2Key(sp, sizeof(sp), uiShownKey[UI_F_SPO2]);
+   char bp[12];
+   if (uiShownKey[UI_F_BPM] < 0) snprintf(bp, sizeof(bp), "--");
+   else                          snprintf(bp, sizeof(bp), "%d", uiShownKey[UI_F_BPM]);
+-  Serial.printf ("   BPM: %s (hrState %s) | SpO2: %s (%s) | Calidad: %s\n",
+-                 bp,
+-                 hrStateText(hrState), sp, oxStateText(oxState), calidadTexto(uiShownKey[UI_F_CAL]));
++  Serial.printf ("   BPM: %s (hrState %s) | SpO2: %s (%s) | Calidad: %s | Pie: %s\n",
++                 bp, hrStateText(hrState), sp, oxStateText(oxState),
++                 calidadTexto(uiShownKey[UI_F_CAL]), modoTexto(uiShownKey[UI_F_PIE]));
+   Serial.println(" SISTEMA");
+   Serial.printf ("   Ultimo reinicio del ESP32  : %s\n", resetReasonText((int)esp_reset_reason()));
+-  Serial.printf ("   Heap libre                 : %lu bytes\n", (unsigned long)ESP.getFreeHeap());
+-  Serial.printf ("   Tiempo encendido           : %lu s\n", (unsigned long)(millis() / 1000UL));
+-  Serial.println("=================================================================\n");
++  Serial.printf ("   Heap libre / minimo historico: %lu / %lu bytes\n",
++                 (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap());
++  Serial.println("=======================================================\n");
+ }
+ 
+ // =================================================================
+@@ -3593,6 +3868,7 @@
+   Serial.println("  y -> diagnostico de integracion: FIFO, perdidas, tiempos TFT");   // 7.3
+   Serial.println("  f -> redibujar toda la pantalla TFT (no durante pruebas)");       // 7.3
+   Serial.println("  l -> activar/desactivar la grafica PPG (no durante pruebas)");    // 8.2
++  Serial.println("  z -> iniciar un tramo nuevo de diagnostico (acumulados intactos)"); // 9
+   Serial.println("  h -> ayuda\n");
+ }
+ 
+@@ -3700,6 +3976,9 @@
+         Serial.printf(">> Pantalla redibujada: %.1f ms (fillScreen #%lu)\n",
+                       uiFullRedrawUs / 1000.0f, (unsigned long)uiFillScreenCount);
+       }
++    } else if (c == 'z' || c == 'Z') {          // Etapa 9 (P4)
++      tramoReiniciar(millis());
++      Serial.println(">> Nuevo tramo de diagnostico iniciado (los acumulados se conservan).");
+     } else if (c == 'l' || c == 'L') {          // Etapa 8.2
+       if (anyTestRunning()) {
+         Serial.println(">> No se cambia la grafica durante una prueba.");
+@@ -3725,7 +4004,7 @@
+ 
+   Serial.println();
+   Serial.println("================================================");
+-  Serial.println(" ETAPA 8.2 - Etapa 7.3 + grafica PPG IR en la TFT");
++  Serial.println(" ETAPA 9 - Integracion y optimizacion (vigilancia, recuperacion, diagnostico)");
+   Serial.println(" Prototipo academico - NO es dispositivo medico");
+   Serial.println(" BPM, R y SpO2 = estimaciones experimentales, SIN validez clinica");
+   Serial.println("================================================");
+@@ -3739,6 +4018,7 @@
+   hrComputeConstants();
+   hrResetDetector();
+   sensorReady = initSensor();
++  if (sensorReady) arranqueRegistrarInit(millis(), ARR_ARRANQUE);   // Etapa 9 (P3)
+   printFilterConfiguration();
+   printHeartRateConfiguration();
+   printSpo2Configuration();
+@@ -3754,6 +4034,9 @@
+   lastRetryMs = now;
+   resetWindow(now);
+   resetFsMeasurement(now);
++  arranqueFinSetup(millis());                   // Etapa 9 (P3)
++  vigilanciaReiniciar(millis());                // Etapa 9 (P1)
++  tramoReiniciar(millis());                     // Etapa 9 (P4): tramo 1 = desde el arranque
+ }
+ 
+ void loop() {
+@@ -3767,6 +4050,7 @@
+       filtersPrimed = false;
+       resetWindow(millis());
+       lastFifoReadMs = 0;                       // Etapa 7.3: no medir la pausa del reintento
++      if (sensorReady) vigilanciaSensorRecuperado(millis());   // Etapa 9 (P2/P3)
+     }
+     handleSerialCommands(now);
+     uiActualizarDesdeEstados(now);              // Etapa 7.3: "SENSOR NO DETECTADO"
+@@ -3778,8 +4062,9 @@
+   if (now - lastPollMs >= POLL_INTERVAL_MS) {
+     lastPollMs = now;
+     integracionAntesDeLeer(now);                // Etapa 7.3: solo registra tiempos
+-    readFifo();
+-    integracionDespuesDeLeer();                 // Etapa 7.3: nivel máximo del FIFO
++    int leidas = readFifo();                    // Etapa 9: se conserva el valor devuelto
++    integracionDespuesDeLeer(leidas);           // Etapa 7.3/9: FIFO, arranque, tramo
++    vigilanciaMuestras(now);                    // Etapa 9 (P1/P2)
+     uiPpgConsumirMuestras(now);                 // Etapa 8.2: gráfica (solo lee spAcIr[])
+     uiActualizarDesdeEstados(now);              // Etapa 7.3: TFT con el FIFO recién vaciado
+   }

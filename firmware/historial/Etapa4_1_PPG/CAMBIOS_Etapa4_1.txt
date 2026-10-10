@@ -1,0 +1,403 @@
+=====================================================================
+ ETAPA 4.1 - CAMBIOS MÍNIMOS SOBRE Etapa4_PPG.ino
+ Corrección del manejo de cambios bruscos, reinicios de filtros y
+ criterios de la prueba guiada.
+ No cambia: hardware, I2C, FIFO, ~100 muestras/s, filtro 0.5-5 Hz,
+ corriente de LED. No agrega BPM ni SpO2.
+ Son 10 bloques. Sustitúyalos en el orden indicado.
+=====================================================================
+
+---------------------------------------------------------------------
+ BLOQUE 1 - Constantes del procesamiento PPG
+ DÓNDE: justo DESPUÉS de la línea
+   const uint32_t SETTLE_SAMPLES       = 200;      // 2 s de estabilización tras reinicio
+ AGREGAR:
+---------------------------------------------------------------------
+const float    SETTLE_DC_TIME_CONSTANT_S = 0.1f; // DC rápido durante la estabilización
+const uint32_t SETTLE_FAST_DC_SAMPLES = 100;    // 1.er segundo: solo DC rápido, filtros detenidos
+
+---------------------------------------------------------------------
+ BLOQUE 2 - Coeficiente del DC rápido
+ DÓNDE: SUSTITUIR la línea
+   float dcAlpha = 0.0f;
+ POR:
+---------------------------------------------------------------------
+float dcAlpha = 0.0f;
+float dcAlphaFast = 0.0f;          // alfa del DC durante la estabilización
+
+---------------------------------------------------------------------
+ BLOQUE 3 - Contadores de reinicio
+ DÓNDE: SUSTITUIR las dos líneas
+   uint32_t autoResets       = 0;     // reinicios por cambio brusco
+   uint32_t manualResets     = 0;
+ POR:
+---------------------------------------------------------------------
+uint32_t autoResets       = 0;     // reinicios por cambio brusco (total)
+uint32_t fingerResets     = 0;     // ...por colocar/retirar el dedo
+uint32_t artifactResets   = 0;     // ...por movimiento con el dedo puesto
+uint32_t manualResets     = 0;
+bool     resetThisSample  = false; // true si la muestra actual provocó un reinicio
+bool     resetPendingClass = false; // reinicio a clasificar al terminar la estabilización
+float    dcIrBeforeReset  = 0.0f;  // DC IR justo antes del reinicio
+
+---------------------------------------------------------------------
+ BLOQUE 4 - Ventanas de la prueba guiada (1 s -> 2 s)
+ DÓNDE: SUSTITUIR las dos líneas
+   const int      SUBWINDOW_SAMPLES     = 100;   // ventanas de ~1 s en el bloque con dedo
+   const int      MAX_SUBWINDOWS        = 12;
+ POR:
+---------------------------------------------------------------------
+const int      SUBWINDOW_SAMPLES     = 200;   // ventanas de ~2 s en el bloque con dedo
+const int      MAX_SUBWINDOWS        = 12;
+const int      MIN_SUBWINDOWS_CV     = 3;     // ventanas mínimas para evaluar el CV
+
+---------------------------------------------------------------------
+ BLOQUE 5 - Variables de la prueba guiada
+ DÓNDE (a): SUSTITUIR
+   uint32_t testStartLost     = 0;
+   char     modeBeforeTest    = 'd';
+ POR:
+---------------------------------------------------------------------
+uint32_t testStartLost     = 0;
+uint32_t testStartFingerResets   = 0;
+uint32_t testStartArtifactResets = 0;
+char     modeBeforeTest    = 'd';
+
+ DÓNDE (b): SUSTITUIR
+   double   tAcSumProd[3];            // suma de AC_RED * AC_IR por bloque
+   uint32_t tCount[3];
+   uint32_t tAcCount[3];
+   uint32_t tSaturated[3];
+ POR:
+double   tAcSumProd[3];            // suma de AC_RED * AC_IR por bloque
+double   tRawSum[3][2];            // suma de valores CRUDOS por bloque
+uint32_t tCount[3];
+uint32_t tAcCount[3];
+uint32_t tSaturated[3];
+uint32_t tResets[3];               // reinicios de filtro dentro de cada bloque
+int      subDiscarded      = 0;    // ventanas descartadas por reinicio
+
+---------------------------------------------------------------------
+ BLOQUE 6 - computeFilterCoefficients()
+ DÓNDE: SUSTITUIR
+   dcAlpha = 1.0f - expf(-1.0f / (FS_NOMINAL * DC_TIME_CONSTANT_S));
+ POR:
+---------------------------------------------------------------------
+  dcAlpha     = 1.0f - expf(-1.0f / (FS_NOMINAL * DC_TIME_CONSTANT_S));
+  dcAlphaFast = 1.0f - expf(-1.0f / (FS_NOMINAL * SETTLE_DC_TIME_CONSTANT_S));
+
+ (Opcional, solo informativo) En printFilterConfiguration(), SUSTITUIR
+ el printf de "Estabilizacion tras reinicio" POR:
+  Serial.printf ("    Estabilizacion tras reinicio: %lu muestras (%.1f s), DC rapido tau = %.1f s,\n",
+                 (unsigned long)SETTLE_SAMPLES, SETTLE_SAMPLES / FS_NOMINAL, SETTLE_DC_TIME_CONSTANT_S);
+  Serial.println("      sin nuevos reinicios durante la estabilizacion (periodo refractario)");
+
+---------------------------------------------------------------------
+ BLOQUE 7 - processPPG() y funciones nuevas de reinicio  (CAMBIO PRINCIPAL)
+ DÓNDE: SUSTITUIR la función completa processPPG() (desde el comentario
+   "// Procesa una muestra de ambos canales..." hasta su llave final)
+ POR estas tres funciones:
+---------------------------------------------------------------------
+void registerAutoReset() {
+  autoResets++;
+  dcIrBeforeReset   = dcEstimate[CH_IR];
+  resetPendingClass = true;
+}
+
+// Clasificación:
+//  - transición de dedo: el DC IR cruzó el umbral de presencia
+//    (dedo colocado o retirado);
+//  - artefacto: el dedo siguió en la misma condición (movimiento o
+//    cambio fuerte de presión).
+void classifyPendingReset() {
+  if (!resetPendingClass) return;
+  bool fingerBefore = (dcIrBeforeReset >= (float)FINGER_IR_THRESHOLD);
+  bool fingerAfter  = (dcEstimate[CH_IR] >= (float)FINGER_IR_THRESHOLD);
+  if (fingerBefore != fingerAfter) fingerResets++;
+  else artifactResets++;
+  resetPendingClass = false;
+}
+
+// Procesa una muestra de ambos canales. Resultados en lastDc[] y lastAc[].
+//
+// Manejo de cambios bruscos (corregido en la Etapa 4.1):
+//  1. Fuera de la estabilización, un cambio > max(10 % DC, 5000) reinicia
+//     los filtros con el valor actual (DC = x, biquads en cero).
+//  2. Durante los 2 s de estabilización NO se permiten nuevos reinicios
+//     (periodo refractario). Así una rampa de colocación o retirada del
+//     dedo produce UN reinicio, no decenas.
+//  3. Primer segundo de la estabilización: solo el DC sigue a la señal
+//     con tau = 0.2 s (absorbe el resto de la rampa); los filtros
+//     pasa-banda permanecen detenidos y en cero, para que la rampa no
+//     genere un transitorio grande en el pasa-altas.
+//  4. Segundo segundo: procesamiento normal (tau = 1 s) para que los
+//     filtros se "calienten". El DC es continuo en ambos cambios.
+//  5. Las muestras en estabilización no se usan en las estadísticas AC.
+void processPPG(uint32_t red, uint32_t ir) {
+  resetThisSample = false;
+  if (!filtersPrimed) {
+    resetFilters(red, ir);
+    resetThisSample = true;
+    return;
+  }
+
+  bool settling = (settleRemaining > 0);
+  if (!settling && (isLargeStep(CH_RED, (float)red) || isLargeStep(CH_IR, (float)ir))) {
+    registerAutoReset();
+    resetFilters(red, ir);
+    resetThisSample = true;
+    return;
+  }
+
+  float x[2];
+  x[CH_RED] = (float)red;
+  x[CH_IR]  = (float)ir;
+  bool fastDcPhase = (settleRemaining > SETTLE_SAMPLES - SETTLE_FAST_DC_SAMPLES);
+
+  for (int ch = 0; ch < 2; ch++) {
+    if (fastDcPhase) {
+      // Fase 1: DC rápido, filtros detenidos (AC = 0)
+      dcEstimate[ch] += dcAlphaFast * (x[ch] - dcEstimate[ch]);
+      lastDc[ch] = dcEstimate[ch];
+      lastAc[ch] = 0.0f;
+    } else {
+      // Fase 2 y operación normal
+      float centered = x[ch] - dcEstimate[ch];              // señal sin DC
+      dcEstimate[ch] += dcAlpha * (x[ch] - dcEstimate[ch]); // actualiza DC
+      float ac = lowPass(ch, highPass(ch, centered));       // pasa-banda 0.5-5 Hz
+      lastDc[ch] = dcEstimate[ch];
+      lastAc[ch] = ac;
+    }
+  }
+  if (settleRemaining > 0) {
+    settleRemaining--;
+    if (settleRemaining == 0) classifyPendingReset();
+  }
+}
+
+---------------------------------------------------------------------
+ BLOQUE 8 - resetTestAccumulators()
+ DÓNDE: SUSTITUIR la función completa resetTestAccumulators()
+ POR estas dos funciones:
+---------------------------------------------------------------------
+void resetTestAccumulators() {
+  for (int k = 0; k < 3; k++) {
+    for (int ch = 0; ch < 2; ch++) {
+      tDcSum[k][ch] = 0.0;
+      tAcSumSq[k][ch] = 0.0;
+      tAcSum[k][ch] = 0.0;
+      tRawSum[k][ch] = 0.0;
+    }
+    tAcSumProd[k] = 0.0;
+    tCount[k] = 0;
+    tAcCount[k] = 0;
+    tSaturated[k] = 0;
+    tResets[k] = 0;
+  }
+  for (int ch = 0; ch < 2; ch++) {
+    subMin[ch] = 1e9f;
+    subMax[ch] = -1e9f;
+  }
+  subCount = 0;
+  subWindows = 0;
+  subDiscarded = 0;
+}
+
+// Descarta la ventana de ~2 s en curso (contiene un reinicio de filtro)
+void discardSubwindow() {
+  if (subCount > 0) subDiscarded++;
+  for (int ch = 0; ch < 2; ch++) {
+    subMin[ch] = 1e9f;
+    subMax[ch] = -1e9f;
+  }
+  subCount = 0;
+}
+
+---------------------------------------------------------------------
+ BLOQUE 9 - accumulateTest() y testMeanRaw()
+ DÓNDE (a): SUSTITUIR la función completa accumulateTest() POR:
+---------------------------------------------------------------------
+void accumulateTest(uint32_t red, uint32_t ir) {
+  int k = activeTestBlock();
+  if (k < 0) return;
+
+  tCount[k]++;
+  if (red >= SATURATION_LEVEL || ir >= SATURATION_LEVEL) tSaturated[k]++;
+  for (int ch = 0; ch < 2; ch++) tDcSum[k][ch] += lastDc[ch];
+  tRawSum[k][CH_RED] += red;
+  tRawSum[k][CH_IR]  += ir;
+
+  // Un reinicio dentro del bloque se cuenta y, en el bloque con dedo,
+  // invalida la ventana de 2 s en curso (no se mezcla con señal PPG).
+  if (resetThisSample) {
+    tResets[k]++;
+    if (k == 1) discardSubwindow();
+  }
+
+  if (!filtersSettled()) return;
+  tAcCount[k]++;
+  for (int ch = 0; ch < 2; ch++) {
+    tAcSumSq[k][ch] += (double)lastAc[ch] * lastAc[ch];
+    tAcSum[k][ch]   += lastAc[ch];
+  }
+  tAcSumProd[k] += (double)lastAc[CH_RED] * lastAc[CH_IR];
+
+  // En el bloque con dedo se mide el p-p en ventanas de ~2 s
+  // (2 s contienen al menos un ciclo completo para pulsos >= 30 lpm)
+  if (k == 1) {
+    for (int ch = 0; ch < 2; ch++) {
+      if (lastAc[ch] < subMin[ch]) subMin[ch] = lastAc[ch];
+      if (lastAc[ch] > subMax[ch]) subMax[ch] = lastAc[ch];
+    }
+    subCount++;
+    if (subCount >= SUBWINDOW_SAMPLES) {
+      if (subWindows < MAX_SUBWINDOWS) {
+        subPP[subWindows][CH_RED] = subMax[CH_RED] - subMin[CH_RED];
+        subPP[subWindows][CH_IR]  = subMax[CH_IR]  - subMin[CH_IR];
+        subWindows++;
+      }
+      for (int ch = 0; ch < 2; ch++) {
+        subMin[ch] = 1e9f;
+        subMax[ch] = -1e9f;
+      }
+      subCount = 0;
+    }
+  }
+}
+
+ DÓNDE (b): AGREGAR esta función nueva justo ANTES de testAcRms():
+float testMeanRaw(int k, int ch) {
+  return (tCount[k] > 0) ? (float)(tRawSum[k][ch] / tCount[k]) : 0.0f;
+}
+
+---------------------------------------------------------------------
+ BLOQUE 10 - startPpgTest() y finishPpgTest()
+ DÓNDE (a): en startPpgTest(), SUSTITUIR
+   testStartLost    = lostSamples;
+ POR:
+---------------------------------------------------------------------
+  testStartLost    = lostSamples;
+  testStartFingerResets   = fingerResets;
+  testStartArtifactResets = artifactResets;
+
+ DÓNDE (b): SUSTITUIR la función completa finishPpgTest() POR:
+void finishPpgTest(uint32_t nowMs) {
+  float dcIr0 = testMeanDc(0, CH_IR), dcIr1 = testMeanDc(1, CH_IR), dcIr2 = testMeanDc(2, CH_IR);
+  float dcRed0 = testMeanDc(0, CH_RED), dcRed1 = testMeanDc(1, CH_RED), dcRed2 = testMeanDc(2, CH_RED);
+  float rmsIr0 = testAcRms(0, CH_IR), rmsIr1 = testAcRms(1, CH_IR), rmsIr2 = testAcRms(2, CH_IR);
+  float rmsRed0 = testAcRms(0, CH_RED), rmsRed1 = testAcRms(1, CH_RED), rmsRed2 = testAcRms(2, CH_RED);
+
+  float ppIr     = subMeanPP(CH_IR);
+  float ppRed    = subMeanPP(CH_RED);
+  float ppIrMin  = subMinPP(CH_IR);
+  float cvIr     = subCvPP(CH_IR);
+  float acdcIr   = (dcIr1 > 0.0f) ? ppIr / dcIr1 * 100.0f : 0.0f;
+  float acdcRed  = (dcRed1 > 0.0f) ? ppRed / dcRed1 * 100.0f : 0.0f;
+  float noiseRef = (rmsIr0 > 1.0f) ? rmsIr0 : 1.0f;      // evita dividir entre ~0
+  float acRatio  = rmsIr1 / noiseRef;
+  float dDcIr    = dcIr1 - dcIr0;
+  // Recuperación = (DC1 - DC2) / (DC1 - DC0): 1.0 = volvió al fondo, 0 = no bajó
+  float recovery = (dDcIr > 0.0f) ? (dcIr1 - dcIr2) / dDcIr : 0.0f;
+  // La misma fórmula con los valores CRUDOS permite distinguir si el que no
+  // bajó fue el DC (error del algoritmo) o la señal del sensor (dedo o mano
+  // todavía sobre el sensor, reflejando luz IR).
+  float rawIr0 = testMeanRaw(0, CH_IR), rawIr1 = testMeanRaw(1, CH_IR), rawIr2 = testMeanRaw(2, CH_IR);
+  float dRawIr = rawIr1 - rawIr0;
+  float rawRecovery = (dRawIr > 0.0f) ? (rawIr1 - rawIr2) / dRawIr : 0.0f;
+  uint32_t testFingerResets   = fingerResets - testStartFingerResets;
+  uint32_t testArtifactResets = artifactResets - testStartArtifactResets;
+  float corr1   = correlationFromSums((double)tAcCount[1], tAcSum[1][CH_RED], tAcSum[1][CH_IR],
+                                       tAcSumSq[1][CH_RED], tAcSumSq[1][CH_IR], tAcSumProd[1]);
+
+  uint32_t testSamples = sampleIndex - testStartSamples;
+  uint32_t testLost    = lostSamples - testStartLost;
+  float    testRate    = testSamples * 1000.0f / (float)(nowMs - testStartMs);
+  uint32_t satTotal    = tSaturated[0] + tSaturated[1] + tSaturated[2];
+
+  bool ok1  = (dDcIr >= MIN_DC_DELTA_IR);
+  bool ok2  = (acRatio >= MIN_AC_RATIO);
+  bool ok3  = (ppIr >= MIN_PP_IR) && (acdcIr >= MIN_ACDC_PERCENT);
+  bool ok4  = (ppRed >= MIN_PP_RED);
+  bool ok5  = (subWindows > 0) && (ppIrMin >= FLAT_PP_LIMIT);
+  bool ok6  = (subWindows >= MIN_SUBWINDOWS_CV) && (cvIr <= MAX_PP_CV);
+  bool ok7  = (recovery >= MIN_RECOVERY);
+  bool ok8  = (satTotal == 0);
+  bool ok9  = (testLost == 0);
+  bool ok10 = (testRate >= RATE_MIN && testRate <= RATE_MAX);
+  bool ok11 = (corr1 >= MIN_RED_IR_CORR);
+
+  Serial.println("\n================================================");
+  Serial.println(" RESULTADOS DE LA PRUEBA PPG (cuentas del ADC, no valores clinicos)");
+  Serial.println("================================================");
+  Serial.println("  Bloque          IR crudo     DC RED     DC IR   AC rms RED  AC rms IR  reinicios");
+  Serial.printf ("  1. Sin dedo    %9.0f  %9.0f %9.0f   %9.1f  %9.1f  %5lu\n",
+                 rawIr0, dcRed0, dcIr0, rmsRed0, rmsIr0, (unsigned long)tResets[0]);
+  Serial.printf ("  2. Dedo quieto %9.0f  %9.0f %9.0f   %9.1f  %9.1f  %5lu\n",
+                 rawIr1, dcRed1, dcIr1, rmsRed1, rmsIr1, (unsigned long)tResets[1]);
+  Serial.printf ("  3. Retirado    %9.0f  %9.0f %9.0f   %9.1f  %9.1f  %5lu\n",
+                 rawIr2, dcRed2, dcIr2, rmsRed2, rmsIr2, (unsigned long)tResets[2]);
+  Serial.println("------------------------------------------------");
+  Serial.printf ("  Ventanas de 2 s con dedo: %d validas, %d descartadas por reinicio\n",
+                 subWindows, subDiscarded);
+  Serial.print  ("  AC p-p IR por ventana :");
+  for (int i = 0; i < subWindows; i++) Serial.printf(" %.0f", subPP[i][CH_IR]);
+  Serial.println();
+  Serial.print  ("  AC p-p RED por ventana:");
+  for (int i = 0; i < subWindows; i++) Serial.printf(" %.0f", subPP[i][CH_RED]);
+  Serial.println();
+  Serial.printf ("  AC p-p medio: IR %.1f | RED %.1f   AC/DC: IR %.3f %% | RED %.3f %%\n",
+                 ppIr, ppRed, acdcIr, acdcRed);
+  Serial.printf ("  AC rms IR con dedo / sin dedo: %.1f veces\n", acRatio);
+  Serial.printf ("  Variacion de amplitud IR (CV): %.0f %%\n", cvIr * 100.0f);
+  Serial.printf ("  Correlacion AC RED-IR con dedo: %.2f\n", corr1);
+  Serial.printf ("  Recuperacion al retirar: DC IR %.0f %% | IR crudo %.0f %%\n",
+                 recovery * 100.0f, rawRecovery * 100.0f);
+  Serial.printf ("  Tasa: %.1f muestras/s | perdidas: %lu | saturadas: %lu\n",
+                 testRate, (unsigned long)testLost, (unsigned long)satTotal);
+  Serial.printf ("  Reinicios de filtro DURANTE la prueba: %lu por dedo colocado/retirado, %lu por artefacto\n",
+                 (unsigned long)testFingerResets, (unsigned long)testArtifactResets);
+  Serial.println("------------------------------------------------");
+  printTestResult("1. La senal cambia al colocar el dedo (DC IR +10000)", ok1);
+  printTestResult("2. Aparece componente AC (rms IR >= 3x el fondo)", ok2);
+  printTestResult("3. Componente pulsatil IR observable (p-p >= 100, AC/DC >= 0.05 %)", ok3);
+  printTestResult("4. Componente pulsatil RED observable (p-p >= 50)", ok4);
+  printTestResult("5. La senal no queda plana (cada ventana p-p >= 20)", ok5);
+  printTestResult("6. Amplitud estable con dedo quieto (CV <= 50 %, >= 3 ventanas de 2 s)", ok6);
+  printTestResult("7. El DC se recupera al retirar el dedo (>= 80 %)", ok7);
+  printTestResult("8. Sin saturacion del ADC", ok8);
+  printTestResult("9. Sin muestras perdidas", ok9);
+  printTestResult("10. Tasa de muestreo entre 95 y 105 muestras/s", ok10);
+  printTestResult("11. RED e IR pulsan juntas (correlacion AC >= 0.70)", ok11);
+  Serial.println("------------------------------------------------");
+
+  if (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11) {
+    Serial.println(" RESULTADO: PRUEBA DE PROCESAMIENTO PPG SUPERADA");
+    Serial.println(" Se observa una componente pulsatil filtrada en RED e IR.");
+    Serial.println(" (Esta etapa NO calcula ni valida frecuencia cardiaca.)");
+  } else {
+    Serial.println(" RESULTADO: PRUEBA DE PROCESAMIENTO PPG NO SUPERADA. Sugerencias:");
+    if (!ok1) Serial.println("  - Cubra completamente la ventana del sensor con la yema del dedo.");
+    if (!ok2 || !ok3 || !ok4 || !ok5 || !ok11) {
+      Serial.println("  - Pulsatilidad baja: apoye el dedo sin presionar (la presion aplasta");
+      Serial.println("    los capilares), caliente las manos o aumente la corriente con '+'.");
+    }
+    if (!ok6) Serial.println("  - Amplitud variable o pocas ventanas validas: mantenga dedo y cable quietos.");
+    if (!ok7) {
+      if (rawRecovery < MIN_RECOVERY) {
+        Serial.println("  - El IR CRUDO tampoco bajo: el sensor seguia recibiendo luz reflejada.");
+        Serial.println("    Aleje por completo el dedo y la mano (el IR se refleja a varios cm).");
+      } else {
+        Serial.println("  - El crudo bajo pero el DC no: posible falla del estimador DC.");
+      }
+    }
+    if (!ok8) Serial.println("  - Saturacion: reduzca la corriente con '-'.");
+    if (!ok9 || !ok10) Serial.println("  - Problema de adquisicion: revise alertas en el diagnostico.");
+  }
+  Serial.println(" (Prueba experimental. No es una medicion clinica.)");
+  Serial.println("================================================\n");
+
+  testPhase  = TEST_IDLE;
+  outputMode = modeBeforeTest;
+}
+
+===================== FIN DE LOS CAMBIOS =====================

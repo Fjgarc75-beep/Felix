@@ -1,0 +1,94 @@
+--- Etapa9_base_fe0111a2.ino	2026-10-02 16:27:18.967511766 -0600
++++ Etapa9.ino	2026-10-02 16:27:39.964207555 -0600
+@@ -2945,14 +2945,22 @@
+ bool     arranquePendiente      = false;
+ uint32_t arranqueLost0          = 0;
+ uint32_t arranqueOvf0           = 0;
+-uint32_t arranqueSetupMs        = 0;     // init -> fin de setup() (solo arranque)
+-bool     arranqueSetupMedido    = false;
+ uint32_t arranqueGapMs          = 0;     // init -> primera lectura del FIFO
+ int      arranqueFifo           = 0;     // nivel del FIFO en esa lectura
+ uint32_t arranqueLost           = 0;     // pérdidas de esa lectura
+ uint32_t arranqueOvf            = 0;     // desbordamientos de esa lectura
+ uint32_t arranqueLostTotal      = 0;     // suma de todas las inicializaciones
+ uint32_t arranqueOvfTotal       = 0;
++// P3: registro PERSISTENTE del arranque inicial (initSensor() dentro de
++// setup()). Se escribe una sola vez; reintentos y recuperaciones no lo tocan.
++bool     arrIniRegistrado       = false; // el sensor se inicializó en setup()
++bool     arrIniSetupMedido      = false;
++uint32_t arrIniSetupMs          = 0;     // initSensor() -> fin de setup()
++bool     arrIniCompleto         = false; // ya ocurrió su primera lectura del FIFO
++uint32_t arrIniGapMs            = 0;     // initSensor() -> primera lectura del FIFO
++int      arrIniFifo             = 0;     // nivel del FIFO en esa lectura
++uint32_t arrIniLost             = 0;     // pérdidas de esa lectura
++uint32_t arrIniOvf              = 0;     // desbordamientos de esa lectura
+ 
+ // P4: tramo actual (desde el encendido o el último 'z')
+ uint32_t tramoInicioMs          = 0;
+@@ -3585,8 +3593,16 @@
+     arranqueOvf  = overflowEvents - arranqueOvf0;
+     arranqueLostTotal += arranqueLost;
+     arranqueOvfTotal  += arranqueOvf;
++    bool esArranque = (arranqueTipo == ARR_ARRANQUE);
++    if (esArranque) {                          // registro persistente del arranque inicial
++      arrIniCompleto = true;
++      arrIniGapMs    = arranqueGapMs;
++      arrIniFifo     = arranqueFifo;
++      arrIniLost     = arranqueLost;
++      arrIniOvf      = arranqueOvf;
++    }
+     Serial.printf("[ARRANQUE] init #%lu (%s): ", (unsigned long)inicializaciones, arranqueTipoTexto(arranqueTipo));
+-    if (arranqueSetupMedido) Serial.printf("setup tras init %lu ms | ", (unsigned long)arranqueSetupMs);
++    if (esArranque && arrIniSetupMedido) Serial.printf("setup tras init %lu ms | ", (unsigned long)arrIniSetupMs);
+     Serial.printf("primera lectura a %lu ms | FIFO %d/%d | perdidas %lu | desbordamientos %lu\n",
+                   (unsigned long)arranqueGapMs, arranqueFifo, FIFO_DEPTH,
+                   (unsigned long)arranqueLost, (unsigned long)arranqueOvf);
+@@ -3628,17 +3644,16 @@
+   arranquePendiente   = true;
+   arranqueLost0       = lostSamples;
+   arranqueOvf0        = overflowEvents;
+-  arranqueSetupMs     = 0;
+-  arranqueSetupMedido = false;
+   arranqueGapMs       = 0;
++  if (tipo == ARR_ARRANQUE) arrIniRegistrado = true;   // solo el init de setup()
+ }
+ 
+ // P3: al final de setup(); mide lo que tarda el resto de setup()
+ // (impresión de la configuración) después de iniciar el sensor
+ void arranqueFinSetup(uint32_t now) {
+-  if (arranquePendiente) {
+-    arranqueSetupMs = now - arranqueInitMs;
+-    arranqueSetupMedido = true;
++  if (arrIniRegistrado && arranqueTipo == ARR_ARRANQUE && arranquePendiente) {
++    arrIniSetupMs     = now - arranqueInitMs;
++    arrIniSetupMedido = true;
+   }
+ }
+ 
+@@ -3767,9 +3782,23 @@
+ 
+   Serial.println(" ARRANQUES E INICIALIZACIONES DEL SENSOR (P3)");
+   Serial.printf ("   Inicializaciones exitosas  : %lu\n", (unsigned long)inicializaciones);
+-  if (inicializaciones > 0) {
+-    Serial.printf ("   Ultima (%s)    : ", arranqueTipoTexto(arranqueTipo));
+-    if (arranqueSetupMedido) Serial.printf("setup tras init %lu ms | ", (unsigned long)arranqueSetupMs);
++  // Arranque inicial: registro persistente (nunca lo sobrescriben reintentos/recuperaciones)
++  Serial.print  ("   Arranque inicial           : ");
++  if (!arrIniRegistrado) {
++    Serial.println("sensor no detectado al encender");
++  } else {
++    if (arrIniSetupMedido) Serial.printf("setup tras init %lu ms | ", (unsigned long)arrIniSetupMs);
++    if (!arrIniCompleto) {
++      Serial.println("primera lectura PENDIENTE");
++    } else {
++      Serial.printf("primera lectura a %lu ms | FIFO %d/%d | perdidas %lu | desbordamientos %lu\n",
++                    (unsigned long)arrIniGapMs, arrIniFifo, FIFO_DEPTH,
++                    (unsigned long)arrIniLost, (unsigned long)arrIniOvf);
++    }
++  }
++  // Última inicialización posterior (reintento o recuperación P2): sin campo de setup()
++  if (inicializaciones > 0 && arranqueTipo != ARR_ARRANQUE) {
++    Serial.printf ("   Ultima (%s)  : ", arranqueTipoTexto(arranqueTipo));
+     if (arranquePendiente) {
+       Serial.println("primera lectura PENDIENTE");
+     } else {

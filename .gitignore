@@ -216,3 +216,32 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ------------------------------------------------------------------
+# Monitor PPG (ESP32 + MAX30102): compilación de Arduino y pruebas
+# ------------------------------------------------------------------
+# Carpetas de compilación de Arduino IDE / arduino-cli
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.gcda
+*.gcno
+*.gcov
+*.gcov.json.gz
+tests/unitarias/build/
+# Dependencias que descarga tests/unitarias/setup_deps.sh (no se versionan)
+tests/unitarias/harness/arduino/libraries/SparkFun_MAX3010x/
+tests/unitarias/harness/arduino/tools/
+tests/unitarias/harness/arduino/libraries/Adafruit_GFX/src/glcdfont_data.h
+# Variables de entorno y secretos
+.env
+.env.*
+*.pem
+*.key
+# Sistema operativo y editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

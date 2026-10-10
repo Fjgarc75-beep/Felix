@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="cat1" tests="113" failures="0">
+  <testcase classname="correlationFromSums" name="C1_01_N R = 2*I + 3 da 1.0; R = -I da -1.0 (100 muestras)"></testcase>
+  <testcase classname="correlationFromSums" name="C1_01_L n = 1 y señal constante (varianza 0) dan 0"></testcase>
+  <testcase classname="correlationFromSums" name="C1_01_E n = 0, sumas incoherentes (varianza negativa) y n = 1 incoherente dan 0, sin NaN"></testcase>
+  <testcase classname="correlationFromSums" name="C1_01_L2 IR constante con roja variable (varR &gt; 0, varI = 0) da 0"></testcase>
+  <testcase classname="hrParabolicOffset" name="C1_02_N (1,3,2) = +1/6; (2,3,1) = -1/6; (1,2,1) = 0"></testcase>
+  <testcase classname="hrParabolicOffset" name="C1_02_L denominador 0 (2,2,2) = 0; (0,1,1.9) se recorta a +0.5"></testcase>
+  <testcase classname="hrParabolicOffset" name="C1_02_E (1,1,5) no es un máximo: devuelve 0"></testcase>
+  <testcase classname="spMedianOf" name="C1_03_N [3,1,2] = 2; [4,1,3,2] = 2.5; el arreglo de entrada no cambia"></testcase>
+  <testcase classname="spMedianOf" name="C1_03_L n = 1; n = 64 (1..64) = 32.5; n = 65 usa solo los 64 primeros"></testcase>
+  <testcase classname="spMedianOf" name="C1_03_E n = 0 y n negativo devuelven 0"></testcase>
+  <testcase classname="spCvOf" name="C1_04_N [1,2,3]: desviación muestral 1, media 2, CV 0.5"></testcase>
+  <testcase classname="spCvOf" name="C1_04_L n = 2 [2,4] = 0.4714; valores iguales = 0"></testcase>
+  <testcase classname="spCvOf" name="C1_04_E n &lt; 2 y media &lt;= 0 devuelven 0 (subCvPP devuelve 99 en ese caso: diferencia documentada)"></testcase>
+  <testcase classname="oxSpo2FromR" name="C1_05_N R = 0.428 -&gt; 99.58 %; R = 0.5 -&gt; 98.76 % (referencia Python)"></testcase>
+  <testcase classname="oxSpo2FromR" name="C1_05_L vértice 0.337 -&gt; 99.96; 0.34 -&gt; 99.96; 1.15 -&gt; 70.16"></testcase>
+  <testcase classname="oxSpo2FromR" name="C1_05_E R = 0 devuelve c = 94.845 (fuera del rango útil; los estados lo filtran)"></testcase>
+  <testcase classname="hrStateText" name="C1_06_N los 3 estados del BPM"></testcase>
+  <testcase classname="hrStateText" name="C1_06_E estados fuera de rango (99, -1) -&gt; SIN SENAL"></testcase>
+  <testcase classname="oxStateText" name="C1_07_N los 5 estados de SpO2, textos distintos"></testcase>
+  <testcase classname="oxStateText" name="C1_07_E fuera de rango (-1, 7) -&gt; SIN SENAL"></testcase>
+  <testcase classname="calidadTexto" name="C1_08_N las 5 categorías confirmadas"></testcase>
+  <testcase classname="calidadTexto" name="C1_08_L todas caben en el campo de 8 caracteres"></testcase>
+  <testcase classname="calidadTexto" name="C1_08_E fuera de rango (-1, 9) -&gt; BUSCANDO"></testcase>
+  <testcase classname="calidadColor" name="C1_09_N verde, amarillo, naranja, gris claro, gris claro"></testcase>
+  <testcase classname="calidadColor" name="C1_09_E fuera de rango -&gt; gris claro"></testcase>
+  <testcase classname="modoTexto" name="C1_10_N los 3 textos del pie"></testcase>
+  <testcase classname="modoTexto" name="C1_10_L todos caben en el campo de 21 caracteres"></testcase>
+  <testcase classname="modoTexto" name="C1_10_E modo desconocido (0, 9) -&gt; ESTIM. EXPERIMENTAL"></testcase>
+  <testcase classname="campoNombre" name="C1_11_N los 4 campos, 7 caracteres cada uno"></testcase>
+  <testcase classname="campoNombre" name="C1_11_E campo fuera de rango (7) -&gt; &quot;Pie    &quot;"></testcase>
+  <testcase classname="uiTextoCentrado" name="C1_12_N (&quot;BUENA&quot;, 8) -&gt; &quot; BUENA  &quot;"></testcase>
+  <testcase classname="uiTextoCentrado" name="C1_12_L texto de 8 queda igual; vacío = 8 espacios; ancho 21"></testcase>
+  <testcase classname="uiTextoCentrado" name="C1_12_E texto más largo que el ancho: truncado, sin escribir después de out[ancho]"></testcase>
+  <testcase classname="formatSpo2Key" name="C1_13_N 985 -&gt; &quot; 98.5&quot;; 1000 -&gt; &quot;100.0&quot;"></testcase>
+  <testcase classname="formatSpo2Key" name="C1_13_L 0 -&gt; &quot;  0.0&quot;; 5 -&gt; &quot;  0.5&quot;; todas de 5 caracteres"></testcase>
+  <testcase classname="formatSpo2Key" name="C1_13_E -1 -&gt; &quot; --.-&quot;; búfer de 6 y de 4 bytes sin desborde (byte centinela)"></testcase>
+  <testcase classname="uiSpo2FieldX" name="C1_14_N con 1 decimal: x = 4 y el campo de 5 caracteres termina antes del %"></testcase>
+  <testcase classname="uiPctX" name="C1_15_N el % está en x = 98"></testcase>
+  <testcase classname="resetReasonText" name="C1_16_N encendido, reset externo, software, panic"></testcase>
+  <testcase classname="resetReasonText" name="C1_16_L los 3 watchdog y el brownout"></testcase>
+  <testcase classname="resetReasonText" name="C1_16_E motivo desconocido (UNKNOWN, 99) -&gt; &quot;otro&quot;"></testcase>
+  <testcase classname="arranqueTipoTexto" name="C1_17_N arranque, reintento, recuperacion P2"></testcase>
+  <testcase classname="arranqueTipoTexto" name="C1_17_E tipo desconocido (5) -&gt; arranque"></testcase>
+  <testcase classname="isLargeStep" name="C1_18_N DC 100000: x 110001 y 89999 son escalón; 109999 no"></testcase>
+  <testcase classname="isLargeStep" name="C1_18_L x = 110000 exacto no es escalón (estricto); DC 20000 usa el mínimo de 5000"></testcase>
+  <testcase classname="isLargeStep" name="C1_18_E DC 0: 4999 no, 5001 sí; los canales son independientes"></testcase>
+  <testcase classname="filtersSettled" name="C1_19_N (primed, 0) -&gt; true"></testcase>
+  <testcase classname="filtersSettled" name="C1_19_L (primed, 1) -&gt; false"></testcase>
+  <testcase classname="filtersSettled" name="C1_19_E (no primed, 0) -&gt; false"></testcase>
+  <testcase classname="computeFilterCoefficients" name="C1_20_N coeficientes = scipy.butter (fs 100); -3.01 dB en fc; ganancia DC 0 y 1"></testcase>
+  <testcase classname="computeFilterCoefficients" name="C1_20_L alfas del DC: 0.009950 (tau 1 s) y 0.095163 (tau 0.1 s)"></testcase>
+  <testcase classname="computeFilterCoefficients" name="C1_20_E ambos biquads estables (polos dentro del círculo unitario)"></testcase>
+  <testcase classname="hrComputeConstants" name="C1_21_N hrEnvDecay = exp(-1/200) = 0.995012"></testcase>
+  <testcase classname="highPass" name="C1_22_N escalón y seno de 1.2 Hz iguales a scipy (error relativo &lt;= 1e-4)"></testcase>
+  <testcase classname="highPass" name="C1_22_L canal RED no altera al IR; estado en cero devuelve b0*x"></testcase>
+  <testcase classname="highPass" name="C1_22_E entrada 262143 sostenida 2000 muestras: finita, acotada y tiende a 0"></testcase>
+  <testcase classname="lowPass" name="C1_23_N escalón, seno de 1.2 Hz y seno de 15 Hz iguales a scipy; 15 Hz atenuado"></testcase>
+  <testcase classname="lowPass" name="C1_23_L canal RED no altera al IR; estado en cero devuelve b0*x"></testcase>
+  <testcase classname="lowPass" name="C1_23_E entrada 262143 sostenida: finita y tiende a 262143"></testcase>
+  <testcase classname="hrMeanInterval" name="C1_24_N [800,1000,1200] -&gt; 1000 ms"></testcase>
+  <testcase classname="hrMeanInterval" name="C1_24_L 1 valor; 8 valores (búfer lleno)"></testcase>
+  <testcase classname="hrMeanInterval" name="C1_24_E historial vacío -&gt; 0"></testcase>
+  <testcase classname="hrMedianInterval" name="C1_25_N [1200,800,1000] desordenado -&gt; 1000; el historial no cambia"></testcase>
+  <testcase classname="hrMedianInterval" name="C1_25_L 8 valores (par): promedio de los dos centrales = 1050"></testcase>
+  <testcase classname="hrMedianInterval" name="C1_25_E historial vacío -&gt; 0"></testcase>
+  <testcase classname="hrComputeCv" name="C1_26_N [800,1000,1200] -&gt; CV 0.2"></testcase>
+  <testcase classname="hrComputeCv" name="C1_26_L 1 valor -&gt; 0"></testcase>
+  <testcase classname="hrComputeCv" name="C1_26_E historial vacío -&gt; 0"></testcase>
+  <testcase classname="hrStableBpm" name="C1_27_N media 1000 ms -&gt; 60 BPM; 500 ms -&gt; 120 BPM"></testcase>
+  <testcase classname="hrStableBpm" name="C1_27_E historial vacío -&gt; 0"></testcase>
+  <testcase classname="hrRefractorySamples" name="C1_28_N sin historial 30; media 1000 ms 60; media 1500 ms 90 (fs 100)"></testcase>
+  <testcase classname="hrRefractorySamples" name="C1_28_L proporcional a fs: 95 -&gt; 28.5; 105 -&gt; 31.5"></testcase>
+  <testcase classname="hrRefractorySamples" name="C1_28_L2 con historial corto (media 400 ms: 60 % = 240 ms &lt; 300 ms) gana el mínimo -&gt; 30"></testcase>
+  <testcase classname="hrTimeoutSamples" name="C1_29_N sin historial 300; media 1000 ms 300 (gana el mínimo de 3 s); 1500 ms 375"></testcase>
+  <testcase classname="hrTimeoutSamples" name="C1_29_L proporcional a fs: 95 -&gt; 285; 105 -&gt; 315"></testcase>
+  <testcase classname="hrValleyBefore" name="C1_30_N búfer 1000-1100 con valle de -5 en 1050 -&gt; -5"></testcase>
+  <testcase classname="hrValleyBefore" name="C1_30_L ventana máxima 159 (incluye pico-159); inicio después del pico; envoltura en 160"></testcase>
+  <testcase classname="hrValleyBefore" name="C1_30_E con historial (media 500 ms) la ventana se reduce a 55 muestras"></testcase>
+  <testcase classname="hrValleyBefore" name="C1_30_L2 historial largo no amplía la ventana; inicio limitado por hrBufStartIdx; pico &lt; ventana"></testcase>
+  <testcase classname="spMedianR" name="C1_31_N 8 valores de R -&gt; su mediana"></testcase>
+  <testcase classname="spMedianR" name="C1_31_E sin valores -&gt; 0"></testcase>
+  <testcase classname="spCvR" name="C1_32_N igual a spCvOf sobre el historial"></testcase>
+  <testcase classname="spCvR" name="C1_32_E 1 valor -&gt; 0"></testcase>
+  <testcase classname="testMeanDc" name="C1_33_N suma/cuenta en los bloques 0, 1 y 2"></testcase>
+  <testcase classname="testMeanDc" name="C1_33_E cuenta 0 -&gt; 0"></testcase>
+  <testcase classname="testMeanRaw" name="C1_34_N suma/cuenta del valor crudo"></testcase>
+  <testcase classname="testMeanRaw" name="C1_34_E cuenta 0 -&gt; 0"></testcase>
+  <testcase classname="testAcRms" name="C1_35_N suma de cuadrados 400 en 4 muestras -&gt; 10"></testcase>
+  <testcase classname="testAcRms" name="C1_35_E cuenta 0 -&gt; 0"></testcase>
+  <testcase classname="subMeanPP" name="C1_36_N [100,120,80] -&gt; 100"></testcase>
+  <testcase classname="subMeanPP" name="C1_36_L 12 subventanas (máximo) -&gt; media de las 12"></testcase>
+  <testcase classname="subMeanPP" name="C1_36_E 0 subventanas -&gt; 0"></testcase>
+  <testcase classname="subMinPP" name="C1_37_N [100,120,80] -&gt; 80"></testcase>
+  <testcase classname="subMinPP" name="C1_37_E 0 subventanas -&gt; 0"></testcase>
+  <testcase classname="subCvPP" name="C1_38_N [100,120,80] -&gt; CV 0.2"></testcase>
+  <testcase classname="subCvPP" name="C1_38_L 1 subventana -&gt; 0"></testcase>
+  <testcase classname="subCvPP" name="C1_38_E media &lt;= 0 -&gt; 99"></testcase>
+  <testcase classname="activeTestBlock" name="C1_39_N fases de medición -&gt; bloques 0, 1, 2"></testcase>
+  <testcase classname="activeTestBlock" name="C1_39_E IDLE y fases de espera -&gt; -1"></testcase>
+  <testcase classname="anyTestRunning" name="C1_40_N las 16 combinaciones de las 4 pruebas"></testcase>
+  <testcase classname="calidadDesdeEstados" name="C1_41_N las 6 filas validadas de la tabla"></testcase>
+  <testcase classname="calidadDesdeEstados" name="C1_41_L DC IR 50000 = hay dedo; 49999 = SIN DEDO; las 60 combinaciones"></testcase>
+  <testcase classname="calidadDesdeEstados" name="C1_41_E sensor no listo -&gt; BUSCANDO aunque los demás estados digan otra cosa"></testcase>
+  <testcase classname="oxQualityFailReason" name="C1_42_N cada criterio fallando solo da su texto"></testcase>
+  <testcase classname="oxQualityFailReason" name="C1_42_L umbrales exactos no fallan; un paso fuera sí; prioridad en el orden del código"></testcase>
+  <testcase classname="oxQualityFailReason" name="C1_42_E todos los criterios cumplen -&gt; &quot;calidad baja&quot; (texto por defecto)"></testcase>
+  <testcase classname="uiPpgValorAPixel" name="C1_43_N valor = centro -&gt; fila 127 (centro de 108-145)"></testcase>
+  <testcase classname="uiPpgValorAPixel" name="C1_43_L centro +- rango/2 -&gt; 108 y 145"></testcase>
+  <testcase classname="uiPpgValorAPixel" name="C1_43_E fuera de escala se recorta a 108 o 145"></testcase>
+  <testcase classname="ppgMuestra" name="C1_44_N devuelve -spAcIr[idx % 256]"></testcase>
+  <testcase classname="ppgMuestra" name="C1_44_L 255; 256 cae en la casilla 0; 2^32-1 cae en la 255"></testcase>
+  <testcase classname="ppgMuestraOk" name="C1_45_N devuelve spOk[idx % 256]"></testcase>
+  <testcase classname="ppgMuestraOk" name="C1_45_L 256 y 2^32-1 respetan la envoltura"></testcase>
+</testsuite>

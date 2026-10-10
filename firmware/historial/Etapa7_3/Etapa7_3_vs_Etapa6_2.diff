@@ -1,0 +1,640 @@
+--- Etapa6_2_SpO2/Etapa6_2_SpO2.ino	2026-09-30 19:28:51.149337149 -0600
++++ Etapa7_3/Etapa7_3.ino	2026-10-01 19:44:01.404503437 -0600
+@@ -1,6 +1,7 @@
+ /*
+  * =====================================================================
+- *  ETAPA 6.2 - Conversión experimental de R a SpO2
++ *  ETAPA 7.3 - Integración: Etapa 6.2 (MAX30102 + PPG + BPM + SpO2)
++ *              + interfaz TFT de la Etapa 7.2 (capa de presentación)
+  * =====================================================================
+  *  Proyecto : Monitor experimental de frecuencia cardiaca y SpO2
+  *  Materia  : Sistemas de Información Hospitalaria
+@@ -9,6 +10,7 @@
+  *  Entorno  : Arduino IDE, Arduino-ESP32 3.3.x (ESP-IDF 5.5)
+  *  Librería : SparkFun MAX3010x Pulse and Proximity Sensor Library
+  *             (MAX30105.h, compatible con MAX30102) + Wire
++ *             Adafruit ST7735 and ST7789 Library + Adafruit GFX (+ BusIO)
+  *
+  *  PROTOTIPO ACADÉMICO Y EXPERIMENTAL.
+  *  NO es un equipo médico certificado ni un dispositivo de diagnóstico.
+@@ -16,10 +18,25 @@
+  *  validez clínica. La curva R -> SpO2 es genérica y NO está calibrada
+  *  para este módulo. No usar para diagnóstico ni decisiones de salud.
+  *
+- *  Conexiones (SIN TFT):
++ *  Conexiones:
+  *    MAX30102 VIN -> 3V3      MAX30102 SDA -> GPIO 21
+  *    MAX30102 GND -> GND      MAX30102 SCL -> GPIO 22
+- *    INT y RD sin conectar
++ *    INT y RD sin conectar (no se usa lógica basada en INT)
++ *    TFT VCC -> 3V3   TFT GND -> GND   TFT LED -> 3V3
++ *    TFT SCK -> 18    TFT SDA -> 23    TFT A0 -> 16
++ *    TFT RESET -> 17  TFT CS -> 5      (sin MISO, microSD sin usar)
++ *
++ *  ETAPA 7.3 - INTEGRACIÓN (solo capa de presentación):
++ *    - Todo el código de la Etapa 6.2 (adquisición, PPG, filtros, BPM,
++ *      R, SpO2, estados, pruebas guiadas, medición de fs) se conserva
++ *      SIN MODIFICACIONES.
++ *    - La interfaz de la Etapa 7.2 SOLO LEE los estados existentes:
++ *      hrState, hrStableBpm(), oxState, oxSpo2, lastDc[CH_IR], sensorReady.
++ *    - Se revisan cada 250 ms, inmediatamente después de vaciar el FIFO;
++ *      cada campo se redibuja como máximo cada 500 ms y solo si cambia
++ *      lo que se ve. Sin fillScreen() durante la medición.
++ *    - La TFT se inicializa ANTES que el MAX30102 (el FIFO no se llena
++ *      durante la inicialización de la pantalla).
+  *
+  *  Adquisición: IDÉNTICA a la Etapa 3 validada (FIFO leído con Wire,
+  *  400 kHz, promedio 4, 400 sps internos -> ~100 muestras/s efectivas).
+@@ -65,7 +82,7 @@
+  *    - Estados: SIN SENAL / ESTABILIZANDO / CALIDAD INSUFICIENTE /
+  *      FUERA DE RANGO / SpO2 VALIDA (estimación experimental).
+  *
+- *  NO se implementa: TFT, WiFi, Bluetooth ni alarmas.
++ *  NO se implementa: WiFi, Bluetooth, alarmas, microSD ni registro.
+  *
+  *  Monitor Serie a 115200 baudios. Comandos:
+  *    s -> monitor de SpO2 (estimación experimental) + resumen por segundo
+@@ -84,6 +101,8 @@
+  *    r -> reiniciar filtros (y detector de pulsos)
+  *    + / - -> corriente de LED
+  *    i -> configuración y coeficientes     h -> ayuda
++ *    y -> diagnóstico de integración (FIFO, pérdidas, tiempos TFT)  [7.3]
++ *    f -> redibujado completo de la TFT (no durante pruebas)         [7.3]
+  * =====================================================================
+  */
+ 
+@@ -91,6 +110,10 @@
+ #include <Wire.h>
+ #include <math.h>
+ #include "MAX30105.h"
++#include <SPI.h>               // Etapa 7.3: TFT
++#include <Adafruit_GFX.h>      // Etapa 7.3: TFT
++#include <Adafruit_ST7735.h>   // Etapa 7.3: TFT
++#include <esp_system.h>        // Etapa 7.3: motivo del último reinicio
+ 
+ // =================================================================
+ //  CONFIGURACIÓN GENERAL (sin cambios respecto a la Etapa 3)
+@@ -2752,6 +2775,488 @@
+   return total;
+ }
+ 
++
++// #################################################################
++//  ETAPA 7.3 - MÓDULO TFT (copiado de la Etapa 7.2 validada; solo se
++//  quitaron el simulador, sus comandos y el modo DATOS SIMULADOS)
++// #################################################################
++// =================================================================
++//  CONFIGURACIÓN DE HARDWARE (validada en Etapa 7.1, NO cambiar)
++// =================================================================
++const int8_t   TFT_SCK         = 18;
++const int8_t   TFT_MOSI        = 23;
++const int8_t   TFT_MISO_UNUSED = 19;    // reservado por SPI; no se conecta
++const int8_t   TFT_DC          = 16;    // A0
++const int8_t   TFT_RST         = 17;
++const int8_t   TFT_CS          = 5;
++const uint32_t TFT_SPI_HZ      = 16000000UL;
++
++Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
++
++// =================================================================
++//  OPCIONES DE PRESENTACIÓN
++// =================================================================
++// 1 = SpO2 con un decimal (98.5 %), 0 = SpO2 entero (98 %).
++// Cambiar solo esta constante; las coordenadas se ajustan solas.
++const int      SPO2_DECIMALS        = 1;
++// Intervalo mínimo entre dos redibujados del MISMO campo. Si llega un
++// cambio antes, queda pendiente y uiService() lo dibuja al cumplirse.
++const uint32_t UI_MIN_INTERVAL_MS   = 500;
++// Etapa 7.3: revisión de estados y duración del aviso inicial
++const uint32_t UI_EVAL_PERIOD_MS    = 250;
++const uint32_t UI_SPLASH_MS         = 3000;
++
++// Códigos de calidad (constantes int: compatibles con el preprocesador)
++const int CAL_BUSCANDO = 0;
++const int CAL_SIN_DEDO = 1;
++const int CAL_MALA     = 2;
++const int CAL_REGULAR  = 3;
++const int CAL_BUENA    = 4;
++const int NUM_CAL      = 5;
++
++// Modos del pie de pantalla (Etapa 7.3: ya no existe el modo simulado)
++const int MODO_EXPERIMENTAL = 1;
++const int MODO_SIN_SENSOR   = 2;
++
++// =================================================================
++//  COLORES (RGB565)
++// =================================================================
++const uint16_t COL_FONDO     = ST77XX_BLACK;
++const uint16_t COL_ENCAB     = 0x000F;   // azul marino
++const uint16_t COL_TITULO    = ST77XX_WHITE;
++const uint16_t COL_ETIQUETA  = 0xC618;   // gris claro
++const uint16_t COL_LINEA     = 0x630C;   // gris oscuro
++const uint16_t COL_INVALIDO  = 0x8410;   // gris medio
++const uint16_t COL_BPM       = ST77XX_GREEN;
++const uint16_t COL_SPO2      = ST77XX_CYAN;
++const uint16_t COL_PIE       = ST77XX_YELLOW;
++
++// =================================================================
++//  DISEÑO: COORDENADAS (rotación 0, 128 x 160)
++//  Fuente clásica GFX: 6 x 8 px por carácter x tamaño.
++// =================================================================
++const int UI_HDR_H      = 14;                    // franja 0-13
++const int UI_TITLE_X    = 31,  UI_TITLE_Y   = 3;   // "MONITOR PPG"
++const int UI_HRLBL_X    = 7,   UI_HRLBL_Y   = 17;  // "FRECUENCIA CARDIACA"
++const int UI_BPM_X      = 16,  UI_BPM_Y     = 28;  // campo 3 car., tamaño 4 (28-59)
++const int UI_BPM_SIZE   = 4;
++const int UI_BPMU_X     = 55,  UI_BPMU_Y    = 62;  // "BPM"
++const int UI_LINE1_Y    = 73;
++const int UI_SPLBL_X    = 25,  UI_SPLBL_Y   = 77;  // "SpO2 ESTIMADA"
++const int UI_SP_Y       = 88;                      // campo tamaño 3 (88-111)
++const int UI_SP_SIZE    = 3;
++const int UI_PCT_Y      = 95;                      // "%" tamaño 2, base alineada
++const int UI_LINE2_Y    = 115;
++const int UI_QLBL_X     = 49,  UI_QLBL_Y    = 119; // "SEÑAL"
++const int UI_Q_X        = 16,  UI_Q_Y       = 129; // campo 8 car., tamaño 2 (129-144)
++const int UI_Q_SIZE     = 2;
++const int UI_Q_CHARS    = 8;
++const int UI_LINE3_Y    = 148;
++const int UI_PIE_X      = 1,   UI_PIE_Y     = 151; // campo 21 car., tamaño 1
++const int UI_PIE_CHARS  = 21;
++
++// =================================================================
++//  ESTADO DE LA INTERFAZ
++//  Cada campo guarda una "clave" = lo que se VE (no el valor crudo):
++//    BPM : valor entero, o -1 si no válido
++//    SpO2: décimas (985) o entero (98), o -1 si no válido
++//    Cal.: código de calidad      Pie: modo
++// =================================================================
++const int UI_F_BPM  = 0;
++const int UI_F_SPO2 = 1;
++const int UI_F_CAL  = 2;
++const int UI_F_PIE  = 3;
++const int UI_NUM_F  = 4;
++const int UI_KEY_NONE = -32768;          // "nunca dibujado"
++
++int      uiDesiredKey[UI_NUM_F];         // lo que se debería ver
++int      uiShownKey[UI_NUM_F];           // lo que se ve en pantalla
++uint32_t uiLastDrawMs[UI_NUM_F];
++uint32_t uiCalls[UI_NUM_F];              // llamadas a actualizar...()
++uint32_t uiDraws[UI_NUM_F];              // redibujados reales
++uint32_t uiLastUs[UI_NUM_F];
++uint32_t uiMaxUs[UI_NUM_F];
++uint32_t uiSumUs[UI_NUM_F];
++uint32_t uiFillScreenCount = 0;          // solo uiInit / uiRedibujarTodo
++int      uiModo            = MODO_EXPERIMENTAL;
++uint32_t uiFullRedrawUs    = 0;
++
++// =================================================================
++//  UTILIDADES DE TEXTO
++// =================================================================
++const char *calidadTexto(int calidad) {
++  switch (calidad) {
++    case CAL_BUENA:    return "BUENA";
++    case CAL_REGULAR:  return "REGULAR";
++    case CAL_MALA:     return "MALA";
++    case CAL_SIN_DEDO: return "SIN DEDO";
++    default:           return "BUSCANDO";
++  }
++}
++
++uint16_t calidadColor(int calidad) {
++  switch (calidad) {
++    case CAL_BUENA:   return ST77XX_GREEN;
++    case CAL_REGULAR: return ST77XX_YELLOW;
++    case CAL_MALA:    return ST77XX_ORANGE;
++    default:          return COL_ETIQUETA;   // SIN DEDO / BUSCANDO
++  }
++}
++
++const char *modoTexto(int modo) {
++  return (modo == MODO_SIN_SENSOR) ? "SENSOR NO DETECTADO" : "ESTIM. EXPERIMENTAL";
++}
++
++const char *campoNombre(int f) {
++  switch (f) {
++    case UI_F_BPM:  return "BPM    ";
++    case UI_F_SPO2: return "SpO2   ";
++    case UI_F_CAL:  return "Calidad";
++    default:        return "Pie    ";
++  }
++}
++
++// Centra 'texto' en un campo de 'ancho' caracteres rellenando con
++// espacios (los espacios, con fondo opaco, borran restos anteriores).
++void uiTextoCentrado(char *out, int ancho, const char *texto) {
++  int n = (int)strlen(texto);
++  if (n > ancho) n = ancho;
++  int izq = (ancho - n) / 2;
++  int i = 0;
++  for (; i < izq; i++) out[i] = ' ';
++  for (int k = 0; k < n; k++) out[i++] = texto[k];
++  for (; i < ancho; i++) out[i] = ' ';
++  out[ancho] = '\0';
++}
++
++// Texto visible del campo SpO2 a partir de su clave (ancho fijo).
++// Se usa tanto para dibujar como para el reporte serie.
++void formatSpo2Key(char *buf, int bufLen, int key) {
++  if (SPO2_DECIMALS > 0) {
++    if (key < 0) snprintf(buf, bufLen, " --.-");
++    else         snprintf(buf, bufLen, "%3d.%d", key / 10, key % 10);
++  } else {
++    if (key < 0) snprintf(buf, bufLen, " --");
++    else         snprintf(buf, bufLen, "%3d", key);
++  }
++}
++
++// Coordenadas del campo SpO2 según SPO2_DECIMALS
++int uiSpo2FieldX()  { return (SPO2_DECIMALS > 0) ? 4 : 22; }   // " 98.5" (5 car.) o " 98" (3 car.)
++int uiPctX()        { return (SPO2_DECIMALS > 0) ? 98 : 80; }
++
++// =================================================================
++//  CAPA DE DIBUJO (único lugar que escribe en la TFT)
++// =================================================================
++void uiDibujarEstatica() {
++  tft.fillRect(0, 0, 128, UI_HDR_H, COL_ENCAB);
++  tft.setTextSize(1);
++  tft.setTextColor(COL_TITULO, COL_ENCAB);
++  tft.setCursor(UI_TITLE_X, UI_TITLE_Y);
++  tft.print("MONITOR PPG");
++
++  tft.setTextColor(COL_ETIQUETA, COL_FONDO);
++  tft.setCursor(UI_HRLBL_X, UI_HRLBL_Y);
++  tft.print("FRECUENCIA CARDIACA");
++  tft.setCursor(UI_BPMU_X, UI_BPMU_Y);
++  tft.print("BPM");
++  tft.drawFastHLine(8, UI_LINE1_Y, 112, COL_LINEA);
++
++  tft.setCursor(UI_SPLBL_X, UI_SPLBL_Y);
++  tft.print("SpO2 ESTIMADA");
++  tft.drawFastHLine(8, UI_LINE2_Y, 112, COL_LINEA);
++
++  tft.setCursor(UI_QLBL_X, UI_QLBL_Y);
++  tft.print("SE");
++  tft.write((uint8_t)0xA5);           // 'Ñ' en la tabla CP437 de la fuente GFX
++  tft.print("AL");
++  tft.drawFastHLine(0, UI_LINE3_Y, 128, COL_LINEA);
++}
++
++void uiDibujarCampoBPM(int key) {
++  char buf[12];
++  uint16_t color = COL_BPM;
++  if (key < 0) { strcpy(buf, " --"); color = COL_INVALIDO; }
++  else         { snprintf(buf, sizeof(buf), "%3d", key); }
++  tft.setTextSize(UI_BPM_SIZE);
++  tft.setTextColor(color, COL_FONDO);     // texto OPACO: sin borrar antes
++  tft.setCursor(UI_BPM_X, UI_BPM_Y);
++  tft.print(buf);
++}
++
++void uiDibujarCampoSpO2(int key) {
++  char buf[12];
++  formatSpo2Key(buf, sizeof(buf), key);
++  uint16_t color = (key < 0) ? COL_INVALIDO : COL_SPO2;
++  tft.setTextSize(UI_SP_SIZE);
++  tft.setTextColor(color, COL_FONDO);
++  tft.setCursor(uiSpo2FieldX(), UI_SP_Y);
++  tft.print(buf);
++  // El "%" acompaña al color del valor (gris si no es válido)
++  tft.setTextSize(2);
++  tft.setTextColor(color, COL_FONDO);
++  tft.setCursor(uiPctX(), UI_PCT_Y);
++  tft.print("%");
++}
++
++void uiDibujarCampoCalidad(int key) {
++  char buf[UI_Q_CHARS + 1];
++  uiTextoCentrado(buf, UI_Q_CHARS, calidadTexto(key));
++  tft.setTextSize(UI_Q_SIZE);
++  tft.setTextColor(calidadColor(key), COL_FONDO);
++  tft.setCursor(UI_Q_X, UI_Q_Y);
++  tft.print(buf);
++}
++
++void uiDibujarPie(int key) {
++  char buf[UI_PIE_CHARS + 1];
++  uiTextoCentrado(buf, UI_PIE_CHARS, modoTexto(key));
++  tft.setTextSize(1);
++  tft.setTextColor(COL_PIE, COL_FONDO);
++  tft.setCursor(UI_PIE_X, UI_PIE_Y);
++  tft.print(buf);
++}
++
++// Dibuja un campo, mide su tiempo y registra lo que quedó visible
++void uiDibujarCampo(int f, uint32_t now) {
++  int key = uiDesiredKey[f];
++  uint32_t t0 = micros();
++  switch (f) {
++    case UI_F_BPM:  uiDibujarCampoBPM(key);     break;
++    case UI_F_SPO2: uiDibujarCampoSpO2(key);    break;
++    case UI_F_CAL:  uiDibujarCampoCalidad(key); break;
++    default:        uiDibujarPie(key);          break;
++  }
++  uint32_t dt = micros() - t0;
++  uiShownKey[f]   = key;
++  uiLastDrawMs[f] = now;
++  uiDraws[f]++;
++  uiLastUs[f] = dt;
++  uiSumUs[f] += dt;
++  if (dt > uiMaxUs[f]) uiMaxUs[f] = dt;
++}
++
++// Registra el valor deseado; dibuja solo si lo visible cambia.
++void uiSolicitar(int f, int key) {
++  uint32_t now = millis();
++  uiCalls[f]++;
++  uiDesiredKey[f] = key;
++  if (key == uiShownKey[f]) return;                     // nada visible cambió
++  if (now - uiLastDrawMs[f] >= UI_MIN_INTERVAL_MS) {
++    uiDibujarCampo(f, now);                             // solo ESTE campo
++  }
++  // si no, queda pendiente (deseado != visible) y lo dibuja uiService()
++}
++
++// =================================================================
++//  INTERFAZ PÚBLICA
++// =================================================================
++// Etapa 7.3: pantalla de presentación (solo durante uiInit, en setup()).
++void uiPantallaInicio() {
++  tft.fillScreen(COL_FONDO);
++  uiFillScreenCount++;
++  tft.fillRect(0, 0, 128, UI_HDR_H, COL_ENCAB);
++  tft.setTextSize(1);
++  tft.setTextColor(COL_TITULO, COL_ENCAB);
++  tft.setCursor(UI_TITLE_X, UI_TITLE_Y);
++  tft.print("MONITOR PPG");
++
++  tft.setTextColor(ST77XX_WHITE, COL_FONDO);
++  tft.setCursor(7, 32);   tft.print("PROTOTIPO ACADEMICO");
++
++  tft.drawRect(4, 52, 120, 34, ST77XX_YELLOW);
++  tft.drawRect(5, 53, 118, 32, ST77XX_YELLOW);
++  tft.setTextColor(ST77XX_YELLOW, COL_FONDO);
++  tft.setCursor(13, 59);  tft.print("NO ES DISPOSITIVO");
++  tft.setCursor(46, 71);  tft.print("MEDICO");
++
++  tft.setTextColor(COL_SPO2, COL_FONDO);
++  tft.setCursor(34, 102); tft.print("ESTIMACION");
++  tft.setCursor(28, 114); tft.print("EXPERIMENTAL");
++
++  tft.drawFastHLine(0, UI_LINE3_Y, 128, COL_LINEA);
++  tft.setTextColor(COL_ETIQUETA, COL_FONDO);
++  tft.setCursor(31, UI_PIE_Y); tft.print("Iniciando...");
++}
++
++void uiRedibujarTodo() {
++  uint32_t now = millis();
++  uint32_t t0 = micros();
++  tft.fillScreen(COL_FONDO);              // redibujado completo DELIBERADO
++  uiFillScreenCount++;
++  uiDibujarEstatica();
++  for (int f = 0; f < UI_NUM_F; f++) uiDibujarCampo(f, now);
++  uiFullRedrawUs = micros() - t0;
++}
++
++void uiInit() {
++  SPI.begin(TFT_SCK, TFT_MISO_UNUSED, TFT_MOSI, -1);   // VSPI, pines explícitos
++  tft.initR(INITR_BLACKTAB);
++  tft.setSPISpeed(TFT_SPI_HZ);
++  tft.setRotation(0);
++  tft.setTextWrap(false);
++  tft.cp437(true);                                    // tabla CP437 correcta (Ñ = 0xA5)
++  for (int f = 0; f < UI_NUM_F; f++) {
++    uiShownKey[f] = UI_KEY_NONE;
++    uiLastDrawMs[f] = 0;
++    uiCalls[f] = uiDraws[f] = uiLastUs[f] = uiMaxUs[f] = uiSumUs[f] = 0;
++  }
++  uiDesiredKey[UI_F_BPM]  = -1;                       // hasta recibir datos: "--"
++  uiDesiredKey[UI_F_SPO2] = -1;
++  uiDesiredKey[UI_F_CAL]  = CAL_BUSCANDO;
++  uiDesiredKey[UI_F_PIE]  = uiModo;
++  uiPantallaInicio();                                 // Etapa 7.3: aviso de 3 s
++  delay(UI_SPLASH_MS);                                // solo en setup(), sensor aún sin iniciar
++  uiRedibujarTodo();
++}
++
++// Dibuja los cambios pendientes cuando se cumple el intervalo mínimo.
++// Llamar en cada loop(); si no hay pendientes no toca la TFT.
++void uiService(uint32_t now) {
++  for (int f = 0; f < UI_NUM_F; f++) {
++    if (uiDesiredKey[f] != uiShownKey[f] && now - uiLastDrawMs[f] >= UI_MIN_INTERVAL_MS) {
++      uiDibujarCampo(f, now);
++    }
++  }
++}
++
++void actualizarBPM(int bpm, bool valido) {
++  int key = -1;
++  if (valido && bpm >= 0) key = (bpm > 999) ? 999 : bpm;
++  uiSolicitar(UI_F_BPM, key);
++}
++
++void actualizarSpO2(float spo2, bool valido) {
++  int key = -1;
++  if (valido && spo2 >= 0.0f) {
++    if (spo2 > 100.0f) spo2 = 100.0f;
++    key = (SPO2_DECIMALS > 0) ? (int)lroundf(spo2 * 10.0f) : (int)lroundf(spo2);
++  }
++  uiSolicitar(UI_F_SPO2, key);
++}
++
++void actualizarCalidad(int calidad) {
++  if (calidad < 0 || calidad >= NUM_CAL) calidad = CAL_BUSCANDO;
++  uiSolicitar(UI_F_CAL, calidad);
++}
++
++void uiSetModo(int modo) {
++  uiModo = (modo == MODO_SIN_SENSOR) ? MODO_SIN_SENSOR : MODO_EXPERIMENTAL;
++  uiSolicitar(UI_F_PIE, uiModo);
++}
++
++
++// =================================================================
++//  ETAPA 7.3 - INTEGRACIÓN: capa de presentación (SOLO LECTURA)
++//  No modifica ninguna variable de la adquisición ni de los algoritmos.
++// =================================================================
++uint32_t uiLastEvalMs      = 0;
++int      maxFifoLevelSeen  = 0;      // máximo de lastFifoLevel observado
++uint32_t maxPollGapMs      = 0;      // separación máxima entre lecturas del FIFO
++uint32_t lastFifoReadMs    = 0;      // 0 = sin lectura previa válida
++
++// Traduce los estados EXISTENTES de las etapas 5 y 6.2 a las cinco
++// categorías de la pantalla. "Hay dedo" usa la MISMA expresión que
++// updateHeartRate(). No agrega ningún criterio nuevo de calidad.
++int calidadDesdeEstados() {
++  if (!sensorReady) return CAL_BUSCANDO;
++  bool finger = (lastDc[CH_IR] >= (float)FINGER_IR_THRESHOLD);
++  if (!finger)                  return CAL_SIN_DEDO;
++  if (hrState == HR_NO_SIGNAL)  return CAL_MALA;      // saturación o señal débil
++  if (hrState != HR_VALID)      return CAL_BUSCANDO;  // BPM estabilizando
++  if (oxState == OX_VALID)      return CAL_BUENA;
++  if (oxState == OX_STABILIZING) return CAL_BUSCANDO; // SpO2 acumulando latidos
++  return CAL_REGULAR;                                 // OX_LOW_QUALITY / OX_OUT_OF_RANGE
++}
++
++// Se llama justo después de readFifo() (FIFO recién vaciado) y en la
++// rama "sensor no listo". Cada UI_EVAL_PERIOD_MS publica los valores
++// reales; las funciones de la 7.2 solo dibujan si cambia lo visible.
++void uiActualizarDesdeEstados(uint32_t now) {
++  if (now - uiLastEvalMs >= UI_EVAL_PERIOD_MS) {
++    uiLastEvalMs = now;
++    bool bpmOk  = sensorReady && (hrState == HR_VALID);
++    bool spo2Ok = sensorReady && (oxState == OX_VALID);   // sin número si no es OX_VALID
++    actualizarBPM(bpmOk ? (int)(hrStableBpm() + 0.5f) : 0, bpmOk);
++    actualizarSpO2(spo2Ok ? oxSpo2 : 0.0f, spo2Ok);
++    actualizarCalidad(calidadDesdeEstados());
++    uiSetModo(sensorReady ? MODO_EXPERIMENTAL : MODO_SIN_SENSOR);
++  }
++  uiService(now);                 // cambios pendientes por el intervalo de 500 ms
++}
++
++// Registro de tiempos de la lectura del FIFO (fuera de readFifo)
++void integracionAntesDeLeer(uint32_t now) {
++  if (lastFifoReadMs != 0) {
++    uint32_t gap = now - lastFifoReadMs;
++    if (gap > maxPollGapMs) maxPollGapMs = gap;
++  }
++  lastFifoReadMs = now;
++}
++
++void integracionDespuesDeLeer() {
++  if (lastFifoLevel > maxFifoLevelSeen) maxFifoLevelSeen = lastFifoLevel;
++}
++
++const char *resetReasonText(int r) {   // recibe esp_reset_reason() convertido a int
++  switch ((esp_reset_reason_t)r) {
++    case ESP_RST_POWERON:  return "encendido";
++    case ESP_RST_EXT:      return "reset externo";
++    case ESP_RST_SW:       return "reinicio por software";
++    case ESP_RST_PANIC:    return "error del programa (panic)";
++    case ESP_RST_INT_WDT:
++    case ESP_RST_TASK_WDT:
++    case ESP_RST_WDT:      return "watchdog";
++    case ESP_RST_BROWNOUT: return "CAIDA DE VOLTAJE (brownout)";
++    default:               return "otro";
++  }
++}
++
++// Comando 'y'
++void printIntegracion() {
++  Serial.println("\n============ DIAGNOSTICO DE INTEGRACION (Etapa 7.3) ============");
++  Serial.println(" ADQUISICION (MAX30102)");
++  Serial.printf ("   Muestras procesadas        : %lu\n", (unsigned long)sampleIndex);
++  Serial.printf ("   Muestras perdidas          : %lu %s\n", (unsigned long)lostSamples,
++                 lostSamples == 0 ? "-> OK" : "-> REVISAR (la TFT o el Serie podrian retrasar la lectura)");
++  Serial.printf ("   Desbordamientos del FIFO   : %lu\n", (unsigned long)overflowEvents);
++  Serial.printf ("   Nivel maximo del FIFO      : %d de %d muestras (%.0f %%)\n",
++                 maxFifoLevelSeen, FIFO_DEPTH, 100.0f * maxFifoLevelSeen / FIFO_DEPTH);
++  Serial.printf ("   Separacion maxima lecturas : %lu ms (nominal %lu ms; capacidad del FIFO ~%.0f ms)\n",
++                 (unsigned long)maxPollGapMs, (unsigned long)POLL_INTERVAL_MS,
++                 FIFO_DEPTH * 1000.0f / measuredFs);
++  Serial.printf ("   Frecuencia de muestreo     : %.2f muestras/s\n", measuredFs);
++  Serial.printf ("   Errores I2C                : %lu\n", (unsigned long)i2cErrors);
++  Serial.println(" TFT (16 MHz, actualizacion parcial)");
++  Serial.printf ("   fillScreen usados          : %lu (solo aviso inicial / uiRedibujarTodo)\n",
++                 (unsigned long)uiFillScreenCount);
++  Serial.printf ("   Ultimo redibujado completo : %.1f ms\n", uiFullRedrawUs / 1000.0f);
++  Serial.println("   Campo    llamadas  redibujados  ultimo(us)  max(us)  prom(us)");
++  uint32_t worst = 0;
++  for (int f = 0; f < UI_NUM_F; f++) {
++    uint32_t avg = uiDraws[f] ? uiSumUs[f] / uiDraws[f] : 0;
++    Serial.printf ("   %s  %8lu  %11lu  %10lu  %7lu  %8lu\n", campoNombre(f),
++                   (unsigned long)uiCalls[f], (unsigned long)uiDraws[f], (unsigned long)uiLastUs[f],
++                   (unsigned long)uiMaxUs[f], (unsigned long)avg);
++    if (f != UI_F_PIE) worst += uiMaxUs[f];
++  }
++  Serial.printf ("   Peor caso BPM+SpO2+Calidad : %.2f ms\n", worst / 1000.0f);
++  Serial.println(" PANTALLA vs ESTADOS");
++  char sp[12];
++  formatSpo2Key(sp, sizeof(sp), uiShownKey[UI_F_SPO2]);
++  char bp[12];
++  if (uiShownKey[UI_F_BPM] < 0) snprintf(bp, sizeof(bp), "--");
++  else                          snprintf(bp, sizeof(bp), "%d", uiShownKey[UI_F_BPM]);
++  Serial.printf ("   BPM: %s (hrState %s) | SpO2: %s (%s) | Calidad: %s\n",
++                 bp,
++                 hrStateText(hrState), sp, oxStateText(oxState), calidadTexto(uiShownKey[UI_F_CAL]));
++  Serial.println(" SISTEMA");
++  Serial.printf ("   Ultimo reinicio del ESP32  : %s\n", resetReasonText((int)esp_reset_reason()));
++  Serial.printf ("   Heap libre                 : %lu bytes\n", (unsigned long)ESP.getFreeHeap());
++  Serial.printf ("   Tiempo encendido           : %lu s\n", (unsigned long)(millis() / 1000UL));
++  Serial.println("=================================================================\n");
++}
++
+ // =================================================================
+ //  MÓDULO: INTERFAZ POR MONITOR SERIE
+ // =================================================================
+@@ -2774,6 +3279,8 @@
+   Serial.println("  + -> aumentar corriente de LED (1 mA)");
+   Serial.println("  - -> disminuir corriente de LED (1 mA)");
+   Serial.println("  i -> configuracion, registros y coeficientes");
++  Serial.println("  y -> diagnostico de integracion: FIFO, perdidas, tiempos TFT");   // 7.3
++  Serial.println("  f -> redibujar toda la pantalla TFT (no durante pruebas)");       // 7.3
+   Serial.println("  h -> ayuda\n");
+ }
+ 
+@@ -2871,6 +3378,16 @@
+       printHeartRateConfiguration();
+       printSpo2Configuration();
+       printSpo2ConversionConfiguration();
++    } else if (c == 'y' || c == 'Y') {          // Etapa 7.3
++      printIntegracion();
++    } else if (c == 'f' || c == 'F') {          // Etapa 7.3
++      if (anyTestRunning()) {
++        Serial.println(">> No se redibuja la pantalla completa durante una prueba.");
++      } else {
++        uiRedibujarTodo();
++        Serial.printf(">> Pantalla redibujada: %.1f ms (fillScreen #%lu)\n",
++                      uiFullRedrawUs / 1000.0f, (unsigned long)uiFillScreenCount);
++      }
+     } else if (c == 'h' || c == 'H') {
+       printHelp();
+     } else {
+@@ -2889,11 +3406,16 @@
+ 
+   Serial.println();
+   Serial.println("================================================");
+-  Serial.println(" ETAPA 6.2 - Conversion experimental de R a SpO2");
++  Serial.println(" ETAPA 7.3 - Integracion: Etapa 6.2 + interfaz TFT (Etapa 7.2)");
+   Serial.println(" Prototipo academico - NO es dispositivo medico");
+   Serial.println(" BPM, R y SpO2 = estimaciones experimentales, SIN validez clinica");
+   Serial.println("================================================");
+ 
++  // Etapa 7.3: la TFT se inicializa ANTES que el MAX30102 (aviso de 3 s
++  // incluido) para que el FIFO no se llene durante la inicialización.
++  uiInit();
++  Serial.printf(" TFT lista (INITR_BLACKTAB, 16 MHz); redibujado inicial %.1f ms\n", uiFullRedrawUs / 1000.0f);
++
+   computeFilterCoefficients();
+   hrComputeConstants();
+   hrResetDetector();
+@@ -2904,7 +3426,7 @@
+   printSpo2ConversionConfiguration();
+ 
+   if (sensorReady) {
+-    Serial.println("Adquisicion iniciada. 's' = monitor de SpO2, 'w' = prueba guiada de SpO2, 'h' = ayuda.\n");
++    Serial.println("Adquisicion iniciada. 's' = monitor de SpO2, 'w' = prueba guiada de SpO2, 'y' = diagnostico de integracion, 'h' = ayuda.\n");
+   } else {
+     Serial.println("Se reintentara la inicializacion cada 5 s.\n");
+   }
+@@ -2925,8 +3447,10 @@
+       sensorReady = initSensor();
+       filtersPrimed = false;
+       resetWindow(millis());
++      lastFifoReadMs = 0;                       // Etapa 7.3: no medir la pausa del reintento
+     }
+     handleSerialCommands(now);
++    uiActualizarDesdeEstados(now);              // Etapa 7.3: "SENSOR NO DETECTADO"
+     return;
+   }
+ 
+@@ -2934,7 +3458,10 @@
+   // procesa dentro de processSample, llamada desde readFifo)
+   if (now - lastPollMs >= POLL_INTERVAL_MS) {
+     lastPollMs = now;
++    integracionAntesDeLeer(now);                // Etapa 7.3: solo registra tiempos
+     readFifo();
++    integracionDespuesDeLeer();                 // Etapa 7.3: nivel máximo del FIFO
++    uiActualizarDesdeEstados(now);              // Etapa 7.3: TFT con el FIFO recién vaciado
+   }
+ 
+   // Comandos del usuario

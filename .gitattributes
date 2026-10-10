@@ -1,0 +1,8 @@
+# Diffs del firmware: las líneas de contexto vacías de un diff unificado son
+# un espacio; se conservan tal cual para que los diffs sigan siendo válidos.
+*.diff -whitespace
+# Reportes CSV generados por las pruebas (fin de línea CRLF del módulo csv de Python).
+tests/unitarias/reports/*.csv -whitespace
+# Archivos binarios
+*.png binary
+*.pptx binary
